@@ -2,11 +2,15 @@
 # safeunlink 安装脚本 (仅支持 Debian/Ubuntu 系列)
 #
 # 自动检测依赖 → 自动构建 → 安装到 PREFIX (默认 /usr/local) →
-# 启动守护进程 → 图形会话自启 → 添加 rm 别名。
+# 启动守护进程 → 图形会话自启 → 自动注入并重启文件管理器 → 添加 rm 别名。
 # 安装后开个新终端即可直接使用: 终端删除被占用文件时红色提示+询问,
 # 文件管理器删除/移入回收站被占用时弹 zenity 图形框。
 #
-# 提权策略: 目标路径当前用户可写则直接写, 否则自动用 sudo (如 /usr/local)。
+# 权限要求:
+#   - 必须以普通用户运行; root 直接运行会被拒绝。
+#   - 需要 root 权限的步骤 (安装到 /usr/local、apt 安装依赖等)
+#     会自动使用 sudo 并询问密码。
+#
 # 环境变量: PREFIX=/usr/local  安装前缀
 set -euo pipefail
 
@@ -31,13 +35,18 @@ else
     die "无法识别系统 (/etc/os-release 不存在), 仅支持 Debian/Ubuntu 系列"
 fi
 
-# ---------- 1. 权限准备 ----------
-SUDO_CMD=""
-if [[ $EUID -ne 0 ]]; then
-    command -v sudo >/dev/null || die "需要 root 权限: 请用 sudo 运行本脚本, 或安装 sudo"
-    SUDO_CMD="sudo"
+# ---------- 1. 权限: 只允许普通用户运行 ----------
+if [[ $EUID -eq 0 ]]; then
+    die "不允许以 root 运行本脚本。
+请用普通用户执行: ./install.sh
+(需要 root 权限的步骤会自动使用 sudo 并询问密码)"
 fi
+command -v sudo >/dev/null || die "需要 sudo (用于安装系统文件), 但未检测到 sudo"
+SUDO_CMD="sudo"
 
+USER_HOME="$HOME"
+
+# 目标路径当前用户可写则直接写, 否则用 sudo
 writable() {
     local dir
     if [[ -d "$1" ]]; then dir="$1"; else dir="$(dirname "$1")"; fi
@@ -46,24 +55,6 @@ writable() {
 run_priv() { # run_priv <目标路径> <命令...>
     local path="$1"; shift
     if writable "$path"; then "$@"; else $SUDO_CMD "$@"; fi
-}
-
-CAN_USER=1
-USER_HOME="$HOME"
-if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
-    USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
-elif [[ $EUID -eq 0 ]]; then
-    CAN_USER=0
-    warn "以 root 直接运行, 跳过用户级步骤 (daemon 启动/别名/自启); 建议用普通用户运行本脚本"
-fi
-USER_HOME="${USER_HOME:-$HOME}"
-
-as_user() {
-    if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
-        runuser -u "$SUDO_USER" -- "$@"
-    else
-        "$@"
-    fi
 }
 
 # ---------- 2. 依赖检测 ----------
@@ -78,7 +69,7 @@ if (( ${#apt_pkgs[@]} )); then
 fi
 command -v zenity >/dev/null || { echo "  缺少 zenity (图形弹窗) → 将安装"; apt_pkgs+=(zenity); }
 if (( ${#apt_pkgs[@]} )); then
-    echo "  执行: apt-get install -y ${apt_pkgs[*]}"
+    echo "  执行: apt-get install -y ${apt_pkgs[*]} (需要 sudo 密码)"
     $SUDO_CMD apt-get update -qq
     $SUDO_CMD apt-get install -y --no-install-recommends "${apt_pkgs[@]}"
 fi
@@ -212,16 +203,9 @@ inject_desktop_overrides() {
         echo "  (未检测到常见文件管理器, 跳过注入; 可手动按 README 操作)"
         rm -f "$list"
     else
-        # root 安装时修正注入文件属主 (cp 以 root 运行会生成 root 属主)
-        if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
-            chown -R "$SUDO_USER":"$SUDO_USER" "$USER_HOME/.local/share/applications" \
-                   "$appdir" 2>/dev/null || true
-        fi
         # 自动重启注入过的文件管理器: 旧进程不带库, 必须经 .desktop 重新拉起
         if [[ -n "${SAFEUNLINK_NO_RESTART:-}" ]]; then
             echo "  (SAFEUNLINK_NO_RESTART=1, 跳过自动重启; 请手动完全退出并重新打开文件管理器)"
-        elif [[ $EUID -eq 0 ]]; then
-            warn "以 root 运行, 无法自动重启文件管理器; 请登录后手动完全退出并重新打开"
         else
             for bin in "${injected[@]}"; do
                 restart_fm "$bin" "${fms[$bin]}"
@@ -231,33 +215,15 @@ inject_desktop_overrides() {
 }
 
 # ---------- 5. 用户级: daemon + 自启 + 文件管理器注入 + 别名 ----------
-if [[ $CAN_USER -eq 1 ]]; then
-    say "启动守护进程..."
-    # 统一以"目标用户 + 正确 XDG_RUNTIME_DIR"运行 daemon 命令,
-    # 避免 root 安装时 socket 路径不一致 (误报未在运行 / 停不掉旧 daemon)
-    daemon_run() { # daemon_run start|stop|status
-        local sub="$1"
-        if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
-            local uid; uid="$(id -u "$SUDO_USER")"
-            if [[ -d "/run/user/$uid" ]]; then
-                runuser -u "$SUDO_USER" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
-                    "$BINDIR/safeunlinkd" "$sub"
-            else
-                runuser -u "$SUDO_USER" -- "$BINDIR/safeunlinkd" "$sub"
-                warn "未检测到 /run/user/$uid (无活动图形会话); 登录后请手动执行: safeunlinkd start"
-            fi
-        else
-            "$BINDIR/safeunlinkd" "$sub"
-        fi
-    }
-    daemon_run stop >/dev/null 2>&1 || true          # 先停旧的, 再加载新版本
-    daemon_run start
-    sleep 0.3
-    daemon_run status || warn "daemon 状态异常, 可手动执行: $BINDIR/safeunlinkd start"
+say "启动守护进程..."
+"$BINDIR/safeunlinkd" stop >/dev/null 2>&1 || true   # 先停旧的, 再加载新版本
+"$BINDIR/safeunlinkd" start
+sleep 0.3
+"$BINDIR/safeunlinkd" status || warn "daemon 状态异常, 可手动执行: $BINDIR/safeunlinkd start"
 
-    say "添加图形会话自启..."
-    mkdir -p "$USER_HOME/.config/autostart"
-    cat > "$USER_HOME/.config/autostart/safeunlinkd.desktop" <<EOF
+say "添加图形会话自启..."
+mkdir -p "$USER_HOME/.config/autostart"
+cat > "$USER_HOME/.config/autostart/safeunlinkd.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=safeunlink daemon
@@ -265,27 +231,23 @@ Comment=删除占用检查守护进程
 Exec=$BINDIR/safeunlinkd start
 X-GNOME-Autostart-enabled=true
 EOF
-    if [[ $EUID -eq 0 ]]; then
-        chown -R "$SUDO_USER":"$SUDO_USER" "$USER_HOME/.config/autostart"
-    fi
-    echo "  $USER_HOME/.config/autostart/safeunlinkd.desktop"
+echo "  $USER_HOME/.config/autostart/safeunlinkd.desktop"
 
-    # 给常见文件管理器注入库, 让图形删除/移入回收站也能弹窗
-    say "给文件管理器注入拦截库 (图形弹窗)..."
-    inject_desktop_overrides
+# 给常见文件管理器注入库, 让图形删除/移入回收站也能弹窗
+say "给文件管理器注入拦截库 (图形弹窗)..."
+inject_desktop_overrides
 
-    if ! grep -q "# >>> safeunlink >>>" "$USER_HOME/.bashrc" 2>/dev/null; then
-        say "添加别名 rm='safe-rm' 到 $USER_HOME/.bashrc"
-        cat >> "$USER_HOME/.bashrc" <<'EOF'
+if ! grep -q "# >>> safeunlink >>>" "$USER_HOME/.bashrc" 2>/dev/null; then
+    say "添加别名 rm='safe-rm' 到 $USER_HOME/.bashrc"
+    cat >> "$USER_HOME/.bashrc" <<'EOF'
 
 # >>> safeunlink >>>
 alias rm='safe-rm'
 # <<< safeunlink <<<
 EOF
-        echo "  新终端生效; 当前终端可执行: source ~/.bashrc"
-    else
-        echo "  别名已存在, 跳过"
-    fi
+    echo "  新终端生效; 当前终端可执行: source ~/.bashrc"
+else
+    echo "  别名已存在, 跳过"
 fi
 
 # ---------- 6. 完成 ----------
@@ -297,8 +259,7 @@ echo "  包装:   $BINDIR/safe-rm"
 echo
 echo "  现在即可使用:"
 echo "    - 终端:  直接 rm 文件, 被占用时红色提示 + 询问 (y/N)"
-echo "    - 图形:  文件管理器删除/移入回收站被占用时弹 zenity 图形框"
-echo "      (需按 README 给文件管理器注入库)"
+echo "    - 图形:  文件管理器删除/移入回收站被占用时弹 zenity 图形框 (已自动注入)"
 echo
 echo "  验证: 打开一个文件后执行  safe-rm <该文件>  看拦截效果"
 echo "  卸载: $ROOT/uninstall.sh"

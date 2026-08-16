@@ -32,6 +32,12 @@ Linux 允许删除"被打开"的文件, 没有内核级的删除前回调, 所�
 ./uninstall.sh    # 一键卸载 (含移除注入)
 ```
 
+**权限要求(重要)**:
+
+- 必须以**普通用户**运行, `sudo ./install.sh` / root 直接运行会被**拒绝**并提示
+- 需要 root 权限的步骤(安装到 `/usr/local`、apt 安装依赖等)脚本会**自动使用
+  `sudo` 并询问密码**
+
 安装脚本会自动给检测到的常见文件管理器 (Nautilus / Thunar / Dolphin /
 Nemo / Caja / PcManFM) 创建 `~/.local/share/applications/` 启动项覆盖:
 在 `Exec=` 前加 `env LD_PRELOAD=...`, 并把 `DBusActivatable` 置为 `false`
