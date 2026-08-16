@@ -27,6 +27,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "config.h"
@@ -161,9 +162,10 @@ static void sanitize_text(char *s)
 }
 
 static void build_holder_text(char *buf, size_t sz, const char *path,
-                              const Holder *holders, int n)
+                              const Holder *holders, int n, const char *op)
 {
-    int off = snprintf(buf, sz, "文件正被其他程序使用:\n\n%s\n\n占用:", path);
+    int off = snprintf(buf, sz, "文件正被其他程序使用 (%s):\n\n%s\n\n占用:",
+                       op, path);
     for (int i = 0; i < n && i < 8 && off < (int)sz - 32; i++)
         off += snprintf(buf + off, sz - (size_t)off, " %s(pid %d)",
                         holders[i].comm, (int)holders[i].pid);
@@ -178,7 +180,8 @@ static int stderr_color(void)
     return isatty(fileno(stderr));
 }
 
-static void print_warning(const char *path, const Holder *holders, int n)
+static void print_warning(const char *path, const Holder *holders, int n,
+                          const char *op)
 {
     int color = stderr_color();
     const char *R = color ? "\033[31m" : "";
@@ -186,7 +189,7 @@ static void print_warning(const char *path, const Holder *holders, int n)
     const char *B = color ? "\033[1m"  : "";
     const char *N = color ? "\033[0m"  : "";
 
-    fprintf(stderr, "%s%s[safeunlink] 文件正被其他程序使用:%s\n", R, B, N);
+    fprintf(stderr, "%s%s[safeunlink] 文件正被其他程序使用 (%s):%s\n", R, B, op, N);
     fprintf(stderr, "%s  目标: %s%s\n", R, path, N);
     for (int i = 0; i < n && i < 8; i++)
         fprintf(stderr, "%s  占用: %s (pid %d)%s\n",
@@ -200,23 +203,25 @@ static void print_warning(const char *path, const Holder *holders, int n)
 }
 
 /* warn / block 模式下, 无终端 (GUI 程序) 时通知 daemon 弹系统通知 */
-static void maybe_notify_gui(const char *path, const Holder *holders, int n)
+static void maybe_notify_gui(const char *path, const Holder *holders, int n,
+                             const char *op)
 {
     if (isatty(fileno(stderr))) return;
     char text[2048];
-    build_holder_text(text, sizeof text, path, holders, n);
+    build_holder_text(text, sizeof text, path, holders, n, op);
     sanitize_text(text);
     daemon_notify(text);
 }
 
-/* 返回 1 = 继续删除, 0 = 取消 (errno=EBUSY) */
-static int ask_user(const char *path, const Holder *holders, int n)
+/* 返回 1 = 继续, 0 = 取消 (errno=EBUSY) */
+static int ask_user(const char *path, const Holder *holders, int n,
+                    const char *op)
 {
     /* 1) 交互终端 */
     int tty = open("/dev/tty", O_RDWR);
     if (tty >= 0) {
-        dprintf(tty, "\033[33m[safeunlink] 文件正被其他程序使用, 仍要删除 \"%s\" 吗? [y/N] \033[0m",
-                path);
+        dprintf(tty, "\033[33m[safeunlink] 文件正被其他程序使用, 仍要%s \"%s\" 吗? [y/N] \033[0m",
+                op, path);
         char buf[16];
         ssize_t rd;
         do { rd = read(tty, buf, sizeof buf - 1); } while (rd < 0 && errno == EINTR);
@@ -250,9 +255,9 @@ static int ask_user(const char *path, const Holder *holders, int n)
 
     /* 3) daemon GUI 弹窗 */
     char text[2048];
-    build_holder_text(text, sizeof text, path, holders, n);
+    build_holder_text(text, sizeof text, path, holders, n, op);
     off_t o = strlen(text);
-    snprintf(text + o, sizeof text - (size_t)o, "\n\n仍要删除该文件吗?");
+    snprintf(text + o, sizeof text - (size_t)o, "\n\n仍要%s吗?", op);
     sanitize_text(text);
     int r = daemon_ask(text);
     if (r >= 0) {
@@ -312,8 +317,28 @@ static int self_proc_exempt(void)
 /*
  * 删除前的守卫。
  * 返回 0 = 放行, -1 = 拒绝 (errno 已设置, 通常 EBUSY)。
+ * op: 操作描述 ("删除" / "移入回收站"), 仅用于提示文案。
+ *
+ * 去重: mv 会先试 renameat2 失败后再回退 renameat, 同一 inode 会在
+ * 极短时间内被守卫两次; 记录最近一次判定结果, 300ms 内重复调用
+ * 静默复用 (拒绝则继续拒绝, 放行则继续放行), 避免重复提示/询问。
  */
-static int maybe_guard(const char *path)
+static struct {
+    dev_t dev;
+    ino_t ino;
+    pid_t pid;
+    long long ts_ms;
+    int refused;
+} g_last_guard;
+
+static long long now_ms(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+static int maybe_guard(const char *path, const char *op)
 {
     if (getenv("SAFEUNLINK_DISABLE")) return 0;     /* 紧急开关 */
     safe_config_load_once();
@@ -325,6 +350,15 @@ static int maybe_guard(const char *path)
     if (lstat(path, &st) != 0) return 0;            /* 不存在/不可访问 → 放行 */
     if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)) return 0;  /* 设备节点 */
 
+    long long ts = now_ms();
+    if (g_last_guard.pid == getpid() &&
+        g_last_guard.dev == st.st_dev &&
+        g_last_guard.ino == st.st_ino &&
+        ts - g_last_guard.ts_ms < 300) {
+        if (g_last_guard.refused) { errno = EBUSY; return -1; }
+        return 0;
+    }
+
     Holder holders[8];
     int n = 0, held = 0;
 
@@ -335,17 +369,25 @@ static int maybe_guard(const char *path)
                               g_cfg.ttl_sec, holders, 8, &n);
     if (held <= 0) return 0;
 
-    print_warning(path, holders, n);
+    int rc;
+    print_warning(path, holders, n, op);
     if (g_cfg.mode == 0) {                          /* warn */
-        maybe_notify_gui(path, holders, n);
-        return 0;
-    }
-    if (g_cfg.mode == 2) {                          /* block */
-        maybe_notify_gui(path, holders, n);
+        maybe_notify_gui(path, holders, n, op);
+        rc = 0;
+    } else if (g_cfg.mode == 2) {                   /* block */
+        maybe_notify_gui(path, holders, n, op);
         errno = EBUSY;
-        return -1;
+        rc = -1;
+    } else {                                        /* ask */
+        rc = ask_user(path, holders, n, op) ? 0 : -1;
     }
-    return ask_user(path, holders, n) ? 0 : -1;     /* ask */
+
+    g_last_guard.dev = st.st_dev;
+    g_last_guard.ino = st.st_ino;
+    g_last_guard.pid = getpid();
+    g_last_guard.ts_ms = ts;
+    g_last_guard.refused = (rc != 0);
+    return rc;
 }
 
 /* ================= 真实函数解析 ================= */
@@ -380,7 +422,7 @@ int unlink(const char *path)
     if (!real_fn("unlink", (void **)&real))
         return syscall(SYS_unlink, path);
     int saved = errno;
-    if (maybe_guard(path) != 0) return -1;
+    if (maybe_guard(path, "删除") != 0) return -1;
     errno = saved;
     return real(path);
 }
@@ -396,7 +438,7 @@ int unlinkat(int dirfd, const char *path, int flags)
         return real(dirfd, path, flags);            /* 解析失败 → 放行 */
 
     int saved = errno;
-    if (maybe_guard(full) != 0) return -1;
+    if (maybe_guard(full, "删除") != 0) return -1;
     errno = saved;
     return real(dirfd, path, flags);
 }
@@ -407,7 +449,7 @@ int rmdir(const char *path)
     if (!real_fn("rmdir", (void **)&real))
         return syscall(SYS_rmdir, path);
     int saved = errno;
-    if (maybe_guard(path) != 0) return -1;
+    if (maybe_guard(path, "删除") != 0) return -1;
     errno = saved;
     return real(path);
 }
@@ -422,9 +464,96 @@ int remove(const char *path)
         return syscall(SYS_unlink, path);
     }
     int saved = errno;
-    if (maybe_guard(path) != 0) return -1;
+    if (maybe_guard(path, "删除") != 0) return -1;
     errno = saved;
     return real(path);
+}
+
+/* ================= 回收站 (移入 Trash) 拦截 ================= */
+
+/* 返回本用户的回收站文件目录: Trash/files (按 XDG 规范) */
+static const char *trash_files_dir(void)
+{
+    static char dir[PATH_MAX];
+    static int inited = 0;
+    if (!inited) {
+        const char *e = getenv("SAFEUNLINK_TRASH_DIR");
+        if (e && *e) snprintf(dir, sizeof dir, "%s", e);
+        else {
+            const char *xdg = getenv("XDG_DATA_HOME");
+            if (xdg && *xdg) snprintf(dir, sizeof dir, "%s/Trash/files", xdg);
+            else {
+                const char *home = getenv("HOME");
+                snprintf(dir, sizeof dir, "%s/.local/share/Trash/files",
+                         (home && *home) ? home : "/tmp");
+            }
+        }
+        inited = 1;
+    }
+    return dir;
+}
+
+/* 目标路径是否位于回收站文件目录 (前缀匹配, 路径边界) */
+static int is_trash_move(const char *dest)
+{
+    if (!dest || !*dest) return 0;
+    const char *dir = trash_files_dir();
+    size_t len = strlen(dir);
+    if (!len || strncmp(dest, dir, len) != 0) return 0;
+    return dest[len] == '\0' || dest[len] == '/';
+}
+
+/* rename 系列的守卫: 仅当目标是"移入回收站"时检查源文件占用 */
+static int maybe_guard_rename(const char *old, const char *newp)
+{
+    if (!old || !newp) return 0;
+    safe_config_load_once();
+    if (!g_cfg.trash) return 0;                     /* 关闭回收站拦截 */
+    if (!is_trash_move(newp)) return 0;             /* 普通移动不拦截 */
+    int saved = errno;
+    int rc = maybe_guard(old, "移入回收站");
+    if (rc == 0) errno = saved;
+    return rc;
+}
+
+int rename(const char *old, const char *newp)
+{
+    static int (*real)(const char *, const char *);
+    if (!real_fn("rename", (void **)&real))
+        return syscall(SYS_rename, old, newp);
+    if (maybe_guard_rename(old, newp) != 0) return -1;
+    return real(old, newp);
+}
+
+int renameat(int olddirfd, const char *old, int newdirfd, const char *newp)
+{
+    static int (*real)(int, const char *, int, const char *);
+    if (!real_fn("renameat", (void **)&real))
+        return syscall(SYS_renameat, olddirfd, old, newdirfd, newp);
+
+    char oldp[PATH_MAX], newfull[PATH_MAX];
+    if (build_path(olddirfd, old, oldp, sizeof oldp) != 0 ||
+        build_path(newdirfd, newp, newfull, sizeof newfull) != 0)
+        return real(olddirfd, old, newdirfd, newp); /* 解析失败 → 放行 */
+
+    if (maybe_guard_rename(oldp, newfull) != 0) return -1;
+    return real(olddirfd, old, newdirfd, newp);
+}
+
+int renameat2(int olddirfd, const char *old, int newdirfd, const char *newp,
+              unsigned int flags)
+{
+    static int (*real)(int, const char *, int, const char *, unsigned int);
+    if (!real_fn("renameat2", (void **)&real))
+        return syscall(SYS_renameat2, olddirfd, old, newdirfd, newp, flags);
+
+    char oldp[PATH_MAX], newfull[PATH_MAX];
+    if (build_path(olddirfd, old, oldp, sizeof oldp) != 0 ||
+        build_path(newdirfd, newp, newfull, sizeof newfull) != 0)
+        return real(olddirfd, old, newdirfd, newp, flags);
+
+    if (maybe_guard_rename(oldp, newfull) != 0) return -1;
+    return real(olddirfd, old, newdirfd, newp, flags);
 }
 
 __attribute__((constructor))

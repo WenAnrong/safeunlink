@@ -272,6 +272,69 @@ err=$(env LD_PRELOAD="$LIB" SAFEUNLINK_MODE=block SAFEUNLINK_SOCKET="$SOCK" "$RM
 if [[ -e "$f" ]]; then ok "daemon 停止后回退本进程扫描, 仍拦截"; else bad "daemon 停止后回退本进程扫描 [$err]"; fi
 stop_hold
 
+echo "== 11. 回收站 (移入 Trash) =="
+
+TRASH="$TMP/xdg/Trash/files"; mkdir -p "$TRASH"
+MV="$(command -v mv)"
+run_mv() { # run_mv <mode> [额外 env...] -- mv 参数...
+    local mode="$1"; shift
+    local extra=()
+    while [[ "$1" != "--" ]]; do extra+=("$1"); shift; done
+    shift
+    env LD_PRELOAD="$LIB" SAFEUNLINK_MODE="$mode" \
+        SAFEUNLINK_SOCKET="$TMP/none.sock" SAFEUNLINK_TRASH_DIR="$TRASH" \
+        "${extra[@]}" "$MV" "$@"
+}
+
+# a. block: 占用文件移入回收站被拦截 (返回 EBUSY, 文件保留)
+f="$TMP/trash1"; echo x > "$f"
+start_hold "$f"
+err=$(run_mv block -- "$f" "$TRASH/" 2>&1); rc=$?
+if [[ -e "$f" && ! -e "$TRASH/trash1" && "$err" == *"移入回收站"* ]]; then
+    ok "block: 占用文件移入回收站被拦截"
+else
+    bad "block: 占用文件移入回收站被拦截 [rc=$rc err=$err]"
+fi
+stop_hold
+
+# b. 未占用 → 正常移入
+f="$TMP/trash2"; echo x > "$f"
+run_mv block -- "$f" "$TRASH/" 2>/dev/null
+if [[ ! -e "$f" && -e "$TRASH/trash2" ]]; then ok "未占用 → 正常移入回收站"; else bad "未占用 → 正常移入回收站"; fi
+
+# c. 占用文件移到普通目录 → 不拦截 (仅回收站目标)
+d="$TMP/other"; mkdir -p "$d"
+f="$TMP/trash3"; echo x > "$f"
+start_hold "$f"
+run_mv block -- "$f" "$d/" 2>/dev/null
+if [[ ! -e "$f" && -e "$d/trash3" ]]; then ok "移到普通目录不拦截 (仅回收站)"; else bad "移到普通目录不拦截 (仅回收站)"; fi
+stop_hold
+
+# d. warn 模式: 占用也移入, 有提示
+f="$TMP/trash4"; echo x > "$f"
+start_hold "$f"
+err=$(run_mv warn -- "$f" "$TRASH/" 2>&1)
+if [[ ! -e "$f" && -e "$TRASH/trash4" && "$err" == *"[safeunlink]"* ]]; then
+    ok "warn: 占用时提示后仍移入回收站"
+else
+    bad "warn: 占用时提示后仍移入回收站 [$err]"
+fi
+stop_hold
+
+# e. SAFEUNLINK_TRASH=0 关闭回收站拦截
+f="$TMP/trash5"; echo x > "$f"
+start_hold "$f"
+run_mv block SAFEUNLINK_TRASH=0 -- "$f" "$TRASH/" 2>/dev/null
+if [[ ! -e "$f" && -e "$TRASH/trash5" ]]; then ok "SAFEUNLINK_TRASH=0 关闭回收站拦截"; else bad "SAFEUNLINK_TRASH=0 关闭回收站拦截"; fi
+stop_hold
+
+# f. 硬链接: 占用 a 链接时, 把另一链接移入回收站 → 按 inode 拦截
+echo x > "$TMP/hl_a"; ln "$TMP/hl_a" "$TMP/hl_b"
+start_hold "$TMP/hl_a"
+err=$(run_mv block -- "$TMP/hl_b" "$TRASH/" 2>&1)
+if [[ -e "$TMP/hl_b" && ! -e "$TRASH/hl_b" ]]; then ok "硬链接占用时移入回收站按 inode 拦截"; else bad "硬链接占用时移入回收站按 inode 拦截 [$err]"; fi
+stop_hold
+
 echo
 echo "结果: $PASS 通过, $FAIL 失败"
 [[ $FAIL -eq 0 ]]

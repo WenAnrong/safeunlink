@@ -7,6 +7,15 @@
 - **ask** — 交互确认 (终端: `y/N`; 无终端的 GUI 程序: daemon 弹 zenity 图形框)
 - **block** — 提示并直接拒绝 (`EBUSY`)
 
+## 功能
+
+- **劫持删除**: `unlink` / `unlinkat` / `remove` / `rmdir` (真删)
+- **劫持移入回收站**: `rename` / `renameat` / `renameat2` 且目标位于
+  `~/.local/share/Trash/files`(XDG 规范)时, 同样按占用检查处理 ——
+  覆盖文件管理器"删除"(实际是移入回收站)的场景
+- 占用检测、三档模式、终端红字、GUI 弹窗/通知、豁免机制、fail-open、
+  紧急开关 (详见下文)
+
 ## 原理
 
 Linux 允许删除"被打开"的文件(进程继续用已删除的 inode), 没有任何内核
@@ -110,6 +119,8 @@ Thunar / Dolphin 同理 (改各自的 .desktop)。先 `make install` 把库放�
 | `SAFEUNLINK_EXEMPT_PROCS` | 豁免"执行删除的进程"名, 逗号分隔 (库) |
 | `SAFEUNLINK_EXEMPT_PATHS` | 豁免路径前缀, 逗号分隔 (库) |
 | `SAFEUNLINK_TTL` | 占用快照有效期秒数, `0` = 每次全盘扫描 (库/daemon) |
+| `SAFEUNLINK_TRASH` | `0` 关闭回收站拦截; 默认开启 (库) |
+| `SAFEUNLINK_TRASH_DIR` | 覆盖回收站文件目录 (默认 `$XDG_DATA_HOME/Trash/files` 或 `~/.local/share/Trash/files`) |
 | `SAFEUNLINK_DISABLE` | 非空 = 完全放行, 紧急开关 (库) |
 | `SAFEUNLINK_ANSWER` | 无终端时 ask 的预置回答: `y` / 其他 = 取消 (库) |
 | `SAFEUNLINK_COLOR` | 非空且非 `0` = 强制输出 ANSI 颜色 (库) |
@@ -127,6 +138,7 @@ mode = ask
 exempt_procs = apt,apt-get,dpkg,snap,flatpak
 exempt_paths =
 ttl = 2
+trash = on       # 回收站拦截: on/off
 dialog = zenity     # zenity | notify | none
 log = auto          # auto | none | 路径
 socket = auto       # auto | 路径
@@ -165,5 +177,6 @@ QUIT\n                   → BYE\n (退出)
 - [x] 阶段 1: 终端 MVP (红色提示 / 交互确认 / 豁免 / 快照扫描)
 - [x] 阶段 2: 常驻 daemon — unix socket 共享快照、zenity 图形询问框、
       notify-send 系统通知、日志、配置
-- [ ] 阶段 3: 加固 — 回收站 (rename) 场景、性能缓存、审计日志、
-      可选 FUSE 兜底; Windows 版思路完全不同 (系统已拦截, 只需句柄枚举)
+- [x] 回收站: 文件管理器"删除"(rename 到 Trash/files)同样拦截
+
+后续不做扩展 (整活项目到此为止) :)

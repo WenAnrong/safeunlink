@@ -12,6 +12,8 @@
 SafeConfig g_cfg;
 static int g_loaded = 0;
 
+static int parse_bool(const char *s);
+
 static void parse_keyval(char *line)
 {
     char *p = line;
@@ -40,6 +42,9 @@ static void parse_keyval(char *line)
         char *end = NULL;
         long v = strtol(val, &end, 10);
         if (end != val && v >= 0) g_cfg.ttl_sec = v;
+    } else if (!strcmp(key, "trash")) {
+        int b = parse_bool(val);
+        if (b >= 0) g_cfg.trash = b;
     } else if (!strcmp(key, "dialog")) {
         snprintf(g_cfg.dialog, sizeof g_cfg.dialog, "%s", val);
     } else if (!strcmp(key, "log")) {
@@ -70,12 +75,24 @@ static void set_mode_from_str(const char *s)
     else if (!strcmp(s, "block")) g_cfg.mode = 2;
 }
 
+/* 解析布尔值: 1/yes/on/true/y → 1; 0/no/off/false/n → 0; 其他 → -1 */
+static int parse_bool(const char *s)
+{
+    if (!s) return -1;
+    if (!strcmp(s, "1") || !strcmp(s, "yes") || !strcmp(s, "on") ||
+        !strcmp(s, "true") || !strcmp(s, "y")) return 1;
+    if (!strcmp(s, "0") || !strcmp(s, "no") || !strcmp(s, "off") ||
+        !strcmp(s, "false") || !strcmp(s, "n")) return 0;
+    return -1;
+}
+
 void safe_config_load(const char *custom)
 {
     g_cfg.mode = 1;                       /* 默认 ask */
     g_cfg.exempt_procs[0] = '\0';
     g_cfg.exempt_paths[0] = '\0';
     g_cfg.ttl_sec = 2;
+    g_cfg.trash = 1;
     snprintf(g_cfg.dialog, sizeof g_cfg.dialog, "zenity");
     snprintf(g_cfg.log_path, sizeof g_cfg.log_path, "auto");
     snprintf(g_cfg.socket_path, sizeof g_cfg.socket_path, "auto");
@@ -102,6 +119,10 @@ void safe_config_load(const char *custom)
         char *end = NULL;
         long v = strtol(e, &end, 10);
         if (end != e && v >= 0) g_cfg.ttl_sec = v;
+    }
+    {
+        int b = parse_bool(getenv("SAFEUNLINK_TRASH"));
+        if (b >= 0) g_cfg.trash = b;
     }
     if ((e = getenv("SAFEUNLINK_DIALOG")) && *e)
         snprintf(g_cfg.dialog, sizeof g_cfg.dialog, "%s", e);
