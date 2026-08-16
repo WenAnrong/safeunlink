@@ -243,12 +243,12 @@ if [[ ! -f "$OVERRIDE" ]]; then ok "uninstall.sh 移除注入的启动项"; else
 
 echo "== 9. install.sh 自动重启文件管理器 =="
 R2="$TMP/rtest"; mkdir -p "$R2/home" "$R2/prefix" "$R2/run" "$R2/fakebin" "$R2/fakeapps" "$R2/logbin"
-# 假 gtk-launch: 只记录参数, 不真正启动
-cat > "$R2/logbin/gtk-launch" <<'EOF'
+# 假 gio: 只记录 launch 参数 (必须是 gio launch <覆盖项路径>, 不能用 gtk-launch)
+cat > "$R2/logbin/gio" <<'EOF'
 #!/usr/bin/env bash
-echo "$@" >> "${GTK_LAUNCH_LOG:?}"
+echo "$@" >> "${GIO_LAUNCH_LOG:?}"
 EOF
-chmod +x "$R2/logbin/gtk-launch"
+chmod +x "$R2/logbin/gio"
 # 假 nautilus 进程: hold 改名后 comm=nautilus, 常驻模拟"旧文件管理器"
 cp "$HOLD" "$R2/fakebin/nautilus"
 echo x > "$R2/fakeapps-target.txt"
@@ -262,7 +262,7 @@ Name=Fake Files
 Exec=/usr/bin/nautilus %U
 DBusActivatable=true
 EOF
-GTK_LAUNCH_LOG="$R2/launch.log" \
+GIO_LAUNCH_LOG="$R2/launch.log" \
 env PATH="$R2/fakebin:$R2/logbin:$PATH" HOME="$R2/home" XDG_RUNTIME_DIR="$R2/run" PREFIX="$R2/prefix" \
     DESKTOP_DIRS="$R2/fakeapps" bash "$ROOT/install.sh" >/dev/null 2>&1
 if ! kill -0 "$FAKEPID" 2>/dev/null; then
@@ -270,10 +270,11 @@ if ! kill -0 "$FAKEPID" 2>/dev/null; then
 else
     bad "install.sh 自动退出运行中的文件管理器"; kill "$FAKEPID" 2>/dev/null
 fi
-if [[ -f "$R2/launch.log" ]] && grep -q "org.gnome.Nautilus" "$R2/launch.log"; then
-    ok "install.sh 经 .desktop 重新启动文件管理器 (LD_PRELOAD 生效)"
+if [[ -f "$R2/launch.log" ]] && grep -q "launch" "$R2/launch.log" \
+    && grep -q "org.gnome.Nautilus.desktop" "$R2/launch.log"; then
+    ok "install.sh 经 gio launch 覆盖项重新启动 (LD_PRELOAD 生效)"
 else
-    bad "install.sh 经 .desktop 重新启动文件管理器 (log: $(cat "$R2/launch.log" 2>/dev/null))"
+    bad "install.sh 经 gio launch 覆盖项重新启动 (log: $(cat "$R2/launch.log" 2>/dev/null))"
 fi
 env HOME="$R2/home" XDG_RUNTIME_DIR="$R2/run" PREFIX="$R2/prefix" bash "$ROOT/uninstall.sh" >/dev/null 2>&1
 

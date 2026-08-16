@@ -112,12 +112,12 @@ restart_fm() {
         sleep 0.3
     fi
     # 3) 经 .desktop 重新启动 (LD_PRELOAD 才会生效)
-    if command -v gtk-launch >/dev/null 2>&1; then
-        gtk-launch "$id" >/dev/null 2>&1 &
-    elif command -v gio >/dev/null 2>&1; then
+    #    注意: 不能用 gtk-launch <id> —— 它走 D-Bus 激活 (--gapplication-service),
+    #    绕过 Exec=, 库不会加载; 必须 gio launch 用户覆盖项文件路径
+    if command -v gio >/dev/null 2>&1; then
         gio launch "$USER_HOME/.local/share/applications/$id" >/dev/null 2>&1 &
     else
-        warn "缺少 gtk-launch/gio, 无法自动重启 $bin; 请手动重新打开"
+        warn "缺少 gio, 无法自动重启 $bin; 请手动重新打开"
         return 1
     fi
     # 4) 验证拦截库是否加载
