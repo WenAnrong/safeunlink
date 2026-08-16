@@ -47,20 +47,39 @@ as_user() {
     fi
 }
 
+# 与 install.sh 一致: 用目标用户的 XDG_RUNTIME_DIR 运行 daemon 命令
+daemon_run() {
+    if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        local uid; uid="$(id -u "$SUDO_USER")"
+        if [[ -d "/run/user/$uid" ]]; then
+            runuser -u "$SUDO_USER" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+                "$BINDIR/safeunlinkd" "$1"
+        else
+            runuser -u "$SUDO_USER" -- "$BINDIR/safeunlinkd" "$1"
+        fi
+    else
+        "$BINDIR/safeunlinkd" "$1"
+    fi
+}
+
 removed=0
 
 # ---------- 1. 用户级: 停 daemon / 删自启 / 删别名 ----------
 if [[ $CAN_USER -eq 1 ]]; then
     say "停止守护进程..."
-    if as_user "$BINDIR/safeunlinkd" stop >/dev/null 2>&1; then
+    if daemon_run stop >/dev/null 2>&1; then
         echo "  已停止"; removed=1
     else
         echo "  未在运行 (或已卸载)"
     fi
-    rm -f "${XDG_RUNTIME_DIR:-/tmp}/safeunlink.sock" \
+    # 兜底清理 socket / pid 残留 (两个可能位置都清; root 运行时用目标用户 uid)
+    target_uid="$(id -u "${SUDO_USER:-$(id -un)}")"
+    rm -f "/run/user/$target_uid/safeunlink.sock" \
+          "/run/user/$target_uid/safeunlink.sock.pid" \
+          "${XDG_RUNTIME_DIR:-/tmp}/safeunlink.sock" \
           "${XDG_RUNTIME_DIR:-/tmp}/safeunlink.sock.pid" \
-          "/tmp/safeunlink-$(id -u).sock" \
-          "/tmp/safeunlink-$(id -u).sock.pid"
+          "/tmp/safeunlink-$target_uid.sock" \
+          "/tmp/safeunlink-$target_uid.sock.pid"
 
     if [[ -f "$USER_HOME/.config/autostart/safeunlinkd.desktop" ]]; then
         rm -f "$USER_HOME/.config/autostart/safeunlinkd.desktop"
@@ -69,6 +88,10 @@ if [[ $CAN_USER -eq 1 ]]; then
 
     if [[ -f "$USER_HOME/.bashrc" ]] && grep -q "# >>> safeunlink >>>" "$USER_HOME/.bashrc"; then
         sed -i '/# >>> safeunlink >>>/,/# <<< safeunlink <<</d' "$USER_HOME/.bashrc"
+        # root 运行时 sed -i 可能改属主, 修正回来
+        if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+            chown "$SUDO_USER":"$SUDO_USER" "$USER_HOME/.bashrc" 2>/dev/null || true
+        fi
         echo "  已删除 ~/.bashrc 中的 safeunlink 别名块"; removed=1
     fi
 

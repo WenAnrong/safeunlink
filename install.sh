@@ -212,6 +212,11 @@ inject_desktop_overrides() {
         echo "  (未检测到常见文件管理器, 跳过注入; 可手动按 README 操作)"
         rm -f "$list"
     else
+        # root 安装时修正注入文件属主 (cp 以 root 运行会生成 root 属主)
+        if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+            chown -R "$SUDO_USER":"$SUDO_USER" "$USER_HOME/.local/share/applications" \
+                   "$appdir" 2>/dev/null || true
+        fi
         # 自动重启注入过的文件管理器: 旧进程不带库, 必须经 .desktop 重新拉起
         if [[ -n "${SAFEUNLINK_NO_RESTART:-}" ]]; then
             echo "  (SAFEUNLINK_NO_RESTART=1, 跳过自动重启; 请手动完全退出并重新打开文件管理器)"
@@ -228,24 +233,27 @@ inject_desktop_overrides() {
 # ---------- 5. 用户级: daemon + 自启 + 文件管理器注入 + 别名 ----------
 if [[ $CAN_USER -eq 1 ]]; then
     say "启动守护进程..."
-    start_daemon() {
+    # 统一以"目标用户 + 正确 XDG_RUNTIME_DIR"运行 daemon 命令,
+    # 避免 root 安装时 socket 路径不一致 (误报未在运行 / 停不掉旧 daemon)
+    daemon_run() { # daemon_run start|stop|status
+        local sub="$1"
         if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
             local uid; uid="$(id -u "$SUDO_USER")"
             if [[ -d "/run/user/$uid" ]]; then
                 runuser -u "$SUDO_USER" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
-                    "$BINDIR/safeunlinkd" start
+                    "$BINDIR/safeunlinkd" "$sub"
             else
-                runuser -u "$SUDO_USER" -- "$BINDIR/safeunlinkd" start
+                runuser -u "$SUDO_USER" -- "$BINDIR/safeunlinkd" "$sub"
                 warn "未检测到 /run/user/$uid (无活动图形会话); 登录后请手动执行: safeunlinkd start"
             fi
         else
-            "$BINDIR/safeunlinkd" start
+            "$BINDIR/safeunlinkd" "$sub"
         fi
     }
-    as_user "$BINDIR/safeunlinkd" stop >/dev/null 2>&1 || true   # 重新加载新版本
-    start_daemon
+    daemon_run stop >/dev/null 2>&1 || true          # 先停旧的, 再加载新版本
+    daemon_run start
     sleep 0.3
-    as_user "$BINDIR/safeunlinkd" status || warn "daemon 状态异常, 可手动执行: $BINDIR/safeunlinkd start"
+    daemon_run status || warn "daemon 状态异常, 可手动执行: $BINDIR/safeunlinkd start"
 
     say "添加图形会话自启..."
     mkdir -p "$USER_HOME/.config/autostart"
