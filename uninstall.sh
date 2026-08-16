@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
 # safeunlink 卸载脚本 — 移除安装脚本安装的全部内容 (仓库源码保留)。
 #
-# 用法: ./uninstall.sh [--keep-config]
-#   --keep-config  保留配置文件 (默认仅删除带本脚本标记的配置)
-# 环境变量与安装脚本一致: PREFIX / SAFEUNLINK_CONF
+# 用法: ./uninstall.sh
+# 环境变量: PREFIX=/usr/local  与安装脚本一致
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-/usr/local}"
 LIBDIR="$PREFIX/lib"
 BINDIR="$PREFIX/bin"
-CONF="${SAFEUNLINK_CONF:-/etc/safeunlink.conf}"
-KEEP_CONFIG=0
-[[ "${1:-}" == "--keep-config" ]] && KEEP_CONFIG=1
 
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_rst=$'\033[0m'
 say()  { echo "${c_grn}==${c_rst} $*"; }
@@ -29,7 +25,7 @@ writable() {
     if [[ -d "$1" ]]; then dir="$1"; else dir="$(dirname "$1")"; fi
     [[ -w "$dir" ]]
 }
-run_priv() { # run_priv <目标路径> <命令...>
+run_priv() {
     local path="$1"; shift
     if writable "$path"; then "$@"; else $SUDO_CMD "$@"; fi
 }
@@ -61,7 +57,6 @@ if [[ $CAN_USER -eq 1 ]]; then
     else
         echo "  未在运行 (或已卸载)"
     fi
-    # 兜底清理 socket / pid 残留
     rm -f "${XDG_RUNTIME_DIR:-/tmp}/safeunlink.sock" \
           "${XDG_RUNTIME_DIR:-/tmp}/safeunlink.sock.pid" \
           "/tmp/safeunlink-$(id -u).sock" \
@@ -78,7 +73,7 @@ if [[ $CAN_USER -eq 1 ]]; then
     fi
 fi
 
-# ---------- 2. 系统级: 删除文件与配置 ----------
+# ---------- 2. 系统级: 删除文件 ----------
 say "删除系统文件..."
 for f in "$LIBDIR/libsafeunlink.so" "$BINDIR/safeunlinkd" "$BINDIR/safe-rm"; do
     if [[ -e "$f" ]]; then
@@ -86,12 +81,6 @@ for f in "$LIBDIR/libsafeunlink.so" "$BINDIR/safeunlinkd" "$BINDIR/safe-rm"; do
         echo "  已删除: $f"; removed=1
     fi
 done
-if [[ $KEEP_CONFIG -eq 0 && -f "$CONF" ]] && grep -q "installed-by-safeunlink" "$CONF" 2>/dev/null; then
-    run_priv "$CONF" rm -f "$CONF"
-    echo "  已删除: $CONF"; removed=1
-elif [[ -f "$CONF" ]]; then
-    echo "  保留配置: $CONF (非本脚本生成, 或 --keep-config)"
-fi
 if [[ "$PREFIX" == "/usr" || "$PREFIX" == "/usr/local" ]]; then
     $SUDO_CMD ldconfig 2>/dev/null || true
 fi

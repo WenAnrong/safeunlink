@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 测试套件: 阶段 1 终端 MVP
-# 用法: LIB=<路径> HOLD=<路径> bash tests/run_tests.sh
+# 测试套件 — 默认功能 (无配置)
+# 用法: LIB=<路径> HOLD=<路径> DCLIENT=<路径> DAEMON=<路径> bash tests/run_tests.sh
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -9,6 +9,7 @@ HOLD="${HOLD:-$ROOT/build/hold}"
 DAEMON="${DAEMON:-$ROOT/build/safeunlinkd}"
 DCLIENT="${DCLIENT:-$ROOT/build/dclient}"
 RM="$(command -v rm)"
+MV="$(command -v mv)"
 
 if [[ ! -f "$LIB" ]]; then echo "缺少 $LIB, 先 make" >&2; exit 1; fi
 if [[ ! -f "$HOLD" ]]; then echo "缺少 $HOLD, 先 make" >&2; exit 1; fi
@@ -20,20 +21,21 @@ if command -v script >/dev/null && script -qec "true" /dev/null >/dev/null 2>&1;
 fi
 
 TMP="$(mktemp -d)"
-DAEMON_SOCKS=()
-stop_daemons() {
-    for s in "${DAEMON_SOCKS[@]+"${DAEMON_SOCKS[@]}"}"; do
-        "$DAEMON" stop --socket "$s" >/dev/null 2>&1
-    done
-    DAEMON_SOCKS=()
-}
-trap '[[ -n "${HOLD_PID:-}" ]] && kill "$HOLD_PID" 2>/dev/null; stop_daemons; rm -rf "$TMP"' EXIT
+# 隔离: socket 与回收站目录都从 XDG 环境变量推导
+export XDG_RUNTIME_DIR="$TMP/run"
+export XDG_DATA_HOME="$TMP/xdg"
+mkdir -p "$XDG_RUNTIME_DIR" "$XDG_DATA_HOME"
+TRASH="$XDG_DATA_HOME/Trash/files"
+mkdir -p "$TRASH"
+SOCK="$XDG_RUNTIME_DIR/safeunlink.sock"
+LOG="$TMP/su.log"
+
+trap '[[ -n "${HOLD_PID:-}" ]] && kill "$HOLD_PID" 2>/dev/null; "$DAEMON" stop --socket "$SOCK" >/dev/null 2>&1; rm -rf "$TMP"' EXIT
 
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "  ok  $1"; }
 bad() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 
-# 启动一个占用文件的进程, 等待它就绪
 start_hold() {
     local f="$1"
     "$HOLD" "$f" 30 >"$TMP/hold.out" 2>&1 &
@@ -50,290 +52,177 @@ stop_hold() {
     HOLD_PID=
 }
 
-# 统一的 rm 执行入口 (环境变量 + 库)
-run_rm() { # run_rm <mode> [额外 env...] -- rm 参数...
-    local mode="$1"; shift
+run_rm() { # run_rm [额外 env...] -- rm 参数...
     local extra=()
     while [[ "$1" != "--" ]]; do extra+=("$1"); shift; done
     shift
-    env LD_PRELOAD="$LIB" SAFEUNLINK_MODE="$mode" \
-        SAFEUNLINK_SOCKET="$TMP/none.sock" "${extra[@]}" "$RM" "$@"
+    env LD_PRELOAD="$LIB" "${extra[@]}" "$RM" "$@"
+}
+run_mv() { # run_mv [额外 env...] -- mv 参数...
+    local extra=()
+    while [[ "$1" != "--" ]]; do extra+=("$1"); shift; done
+    shift
+    env LD_PRELOAD="$LIB" "${extra[@]}" "$MV" "$@"
 }
 
-echo "== 1. warn 模式 =="
+echo "== 1. 未占用 → 正常删除 =="
+f="$TMP/free1"; echo x > "$f"
+err=$(run_rm -- -f "$f" 2>&1)
+if [[ ! -e "$f" && "$err" != *"[safeunlink]"* ]]; then ok "直接删除, 无提示"; else bad "直接删除, 无提示 [$err]"; fi
 
-f="$TMP/warn_unheld"; echo x > "$f"
-err=$(run_rm warn -- -f "$f" 2>&1)
-if [[ ! -e "$f" && "$err" != *"[safeunlink]"* ]]; then ok "未占用时直接删除, 无提示"; else bad "未占用时直接删除, 无提示 [$err]"; fi
-
-f="$TMP/warn_held"; echo x > "$f"
+echo "== 2. 占用 + 无 daemon + 无终端 → 提示后放行 (fail-open) =="
+f="$TMP/held1"; echo x > "$f"
 start_hold "$f"
-err=$(run_rm warn -- -f "$f" 2>&1)
-if [[ ! -e "$f" && "$err" == *"[safeunlink]"* ]]; then ok "被占用时红色提示后仍删除"; else bad "被占用时红色提示后仍删除 [$err]"; fi
+err=$(run_rm -- -f "$f" 2>&1)
+if [[ ! -e "$f" && "$err" == *"[safeunlink]"* ]]; then ok "提示被占用后继续删除"; else bad "提示被占用后继续删除 [$err]"; fi
 stop_hold
 
-echo "== 2. block 模式 =="
-
-f="$TMP/block_held"; echo x > "$f"
+echo "== 3. 脚本预答 SAFEUNLINK_ANSWER =="
+f="$TMP/ans_n"; echo x > "$f"
 start_hold "$f"
-err=$(run_rm block -- "$f" 2>&1); rc=$?
-if [[ -e "$f" && $rc -ne 0 && "$err" == *"[safeunlink]"* ]]; then ok "被占用时拒绝删除 (EBUSY), 文件保留"; else bad "被占用时拒绝删除 (EBUSY), 文件保留 [rc=$rc err=$err]"; fi
+err=$(run_rm SAFEUNLINK_ANSWER=n -- "$f" 2>&1); rc=$?
+if [[ -e "$f" && $rc -ne 0 ]]; then ok "ANSWER=n → 取消, 文件保留"; else bad "ANSWER=n → 取消 [rc=$rc err=$err]"; fi
 stop_hold
 
-f="$TMP/block_unheld"; echo x > "$f"
-run_rm block -- "$f" 2>/dev/null
-if [[ ! -e "$f" ]]; then ok "未占用时 block 模式正常删除"; else bad "未占用时 block 模式正常删除"; fi
-
-echo "== 3. ask 模式 =="
-
-f="$TMP/ask_deny"; echo x > "$f"
+f="$TMP/ans_y"; echo x > "$f"
 start_hold "$f"
-err=$(run_rm ask SAFEUNLINK_ANSWER=n -- -f "$f" 2>&1); rc=$?
-if [[ -e "$f" && $rc -ne 0 ]]; then ok "SAFEUNLINK_ANSWER=n → 取消删除"; else bad "SAFEUNLINK_ANSWER=n → 取消删除 [rc=$rc err=$err]"; fi
+run_rm SAFEUNLINK_ANSWER=y -- -f "$f" 2>/dev/null
+if [[ ! -e "$f" ]]; then ok "ANSWER=y → 确认删除"; else bad "ANSWER=y → 确认删除"; fi
 stop_hold
 
-f="$TMP/ask_confirm"; echo x > "$f"
+echo "== 4. 紧急开关 =="
+f="$TMP/disable"; echo x > "$f"
 start_hold "$f"
-err=$(run_rm ask SAFEUNLINK_ANSWER=y -- -f "$f" 2>&1)
-if [[ ! -e "$f" ]]; then ok "SAFEUNLINK_ANSWER=y → 确认删除"; else bad "SAFEUNLINK_ANSWER=y → 确认删除 [$err]"; fi
-stop_hold
-
-f="$TMP/ask_notty"; echo x > "$f"
-start_hold "$f"
-err=$(run_rm ask -- -f "$f" 2>&1)
-if [[ ! -e "$f" && "$err" == *"无交互终端"* ]]; then ok "无 tty 且无预置回答 → 回退 warn 继续删除"; else bad "无 tty 且无预置回答 → 回退 warn 继续删除 [$err]"; fi
-stop_hold
-
-if [[ $PTY_OK -eq 1 ]]; then
-    f="$TMP/ask_pty_deny"; echo x > "$f"
-    start_hold "$f"
-    out=$(printf 'n\n' | script -qec "env LD_PRELOAD=$LIB SAFEUNLINK_MODE=ask $RM '$f'" /dev/null 2>&1)
-    if [[ -e "$f" ]]; then ok "pty 交互: 回答 n → 取消删除"; else bad "pty 交互: 回答 n → 取消删除"; fi
-    stop_hold
-
-    f="$TMP/ask_pty_confirm"; echo x > "$f"
-    start_hold "$f"
-    out=$(printf 'y\n' | script -qec "env LD_PRELOAD=$LIB SAFEUNLINK_MODE=ask $RM '$f'" /dev/null 2>&1)
-    if [[ ! -e "$f" ]]; then ok "pty 交互: 回答 y → 确认删除"; else bad "pty 交互: 回答 y → 确认删除"; fi
-    stop_hold
-else
-    echo "  (跳过 pty 交互测试: 本环境无法分配伪终端)"
-fi
-
-echo "== 4. 颜色输出 =="
-
-f="$TMP/color"; echo x > "$f"
-start_hold "$f"
-err=$(run_rm warn SAFEUNLINK_COLOR=1 -- -f "$f" 2>&1)
-if [[ "$err" == *$'\e[31m'* ]]; then ok "SAFEUNLINK_COLOR=1 强制输出红色 ANSI"; else bad "SAFEUNLINK_COLOR=1 强制输出红色 ANSI"; fi
-stop_hold
-
-if [[ $PTY_OK -eq 1 ]]; then
-    f="$TMP/color_tty"; echo x > "$f"
-    start_hold "$f"
-    out=$(script -qec "env LD_PRELOAD=$LIB SAFEUNLINK_MODE=warn $RM -f '$f'" /dev/null 2>&1)
-    if [[ "$out" == *$'\e[31m'* ]]; then ok "真实终端下自动输出红色 ANSI"; else bad "真实终端下自动输出红色 ANSI"; fi
-    stop_hold
-fi
-
-echo "== 5. 豁免机制 =="
-
-# exempt_procs 豁免的是"执行删除的进程" (这里把 rm 复制成名为 apt 的二进制)
-f="$TMP/exempt_proc"; echo x > "$f"
-cp "$RM" "$TMP/apt"
-start_hold "$f"
-env LD_PRELOAD="$LIB" SAFEUNLINK_MODE=block SAFEUNLINK_EXEMPT_PROCS=apt "$TMP/apt" -f "$f" 2>/dev/null
-if [[ ! -e "$f" ]]; then ok "exempt_procs 豁免执行删除的进程 (apt)"; else bad "exempt_procs 豁免执行删除的进程 (apt)"; fi
-stop_hold
-
-f="$TMP/exempt_path"; echo x > "$f"
-start_hold "$f"
-run_rm block SAFEUNLINK_EXEMPT_PATHS="$TMP" -- -f "$f" 2>/dev/null
-if [[ ! -e "$f" ]]; then ok "exempt_paths 豁免该目录"; else bad "exempt_paths 豁免该目录"; fi
-stop_hold
-
-echo "== 6. 紧急开关 =="
-
-f="$TMP/killswitch"; echo x > "$f"
-start_hold "$f"
-run_rm block SAFEUNLINK_DISABLE=1 -- -f "$f" 2>/dev/null
+run_rm SAFEUNLINK_DISABLE=1 -- -f "$f" 2>/dev/null
 if [[ ! -e "$f" ]]; then ok "SAFEUNLINK_DISABLE=1 完全放行"; else bad "SAFEUNLINK_DISABLE=1 完全放行"; fi
 stop_hold
 
-echo "== 7. 批量删除 rm -rf =="
-
-d="$TMP/batch"; mkdir -p "$d"
-echo x > "$d/a"; echo x > "$d/b"; echo x > "$d/c"
-start_hold "$d/c"
-err=$(run_rm block -- -rf "$d" 2>&1); rc=$?
-if [[ -e "$d/c" && ! -e "$d/a" && ! -e "$d/b" ]]; then ok "rm -rf 中仅被占用文件被拦截, 其余删除"; else bad "rm -rf 中仅被占用文件被拦截, 其余删除 [rc=$rc err=$err]"; fi
-stop_hold
-
-echo "== 8. 符号链接 / 硬链接 =="
-
+echo "== 5. 符号链接 / 硬链接 =="
 t="$TMP/target"; echo x > "$t"
 start_hold "$t"
 ln -s "$t" "$TMP/sym"
-run_rm block -- "$TMP/sym" 2>/dev/null
-if [[ ! -e "$TMP/sym" && -e "$t" ]]; then ok "删除符号链接不误报 (lstat 按链接自身 inode)"; else bad "删除符号链接不误报"; fi
+run_rm -- "$TMP/sym" 2>/dev/null
+if [[ ! -e "$TMP/sym" && -e "$t" ]]; then ok "删除符号链接不误报"; else bad "删除符号链接不误报"; fi
 stop_hold
 
 ln "$TMP/target" "$TMP/hard"
 start_hold "$TMP/target"
-err=$(run_rm block -- "$TMP/hard" 2>&1)
+err=$(run_rm SAFEUNLINK_ANSWER=n -- "$TMP/hard" 2>&1)
 if [[ -e "$TMP/hard" ]]; then ok "硬链接被占用时按 inode 拦截另一链接"; else bad "硬链接被占用时按 inode 拦截另一链接 [$err]"; fi
 stop_hold
 
-echo "== 9. 一次 rm 多个文件 =="
-
-f1="$TMP/m1"; f2="$TMP/m2"; echo x > "$f1"; echo x > "$f2"
-start_hold "$f1"
-run_rm block -- -f "$f1" "$f2" 2>/dev/null
-if [[ -e "$f1" && ! -e "$f2" ]]; then ok "同一 rm 内仅占用文件被拦截"; else bad "同一 rm 内仅占用文件被拦截"; fi
+echo "== 6. 回收站 (移入 Trash) =="
+f="$TMP/t1"; echo x > "$f"
+start_hold "$f"
+err=$(run_mv SAFEUNLINK_ANSWER=n -- "$f" "$TRASH/" 2>&1)
+if [[ -e "$f" && ! -e "$TRASH/t1" && "$err" == *"移入回收站"* ]]; then
+    ok "占用时移入回收站被拦截"
+else
+    bad "占用时移入回收站被拦截 [err=$err]"
+fi
 stop_hold
 
-echo "== 10. 守护进程 (阶段 2) =="
+f="$TMP/t2"; echo x > "$f"
+run_mv -- "$f" "$TRASH/" 2>/dev/null
+if [[ ! -e "$f" && -e "$TRASH/t2" ]]; then ok "未占用 → 正常移入回收站"; else bad "未占用 → 正常移入回收站"; fi
 
-SOCK="$TMP/su.sock"; LOG="$TMP/su.log"
-SOCK2="$TMP/su2.sock"; LOG2="$TMP/su2.log"
+d="$TMP/other"; mkdir -p "$d"
+f="$TMP/t3"; echo x > "$f"
+start_hold "$f"
+run_mv -- "$f" "$d/" 2>/dev/null
+if [[ ! -e "$f" && -e "$d/t3" ]]; then ok "移到普通目录不拦截 (仅回收站)"; else bad "移到普通目录不拦截"; fi
+stop_hold
 
-env SAFEUNLINK_TTL=0 "$DAEMON" start --socket "$SOCK" --log "$LOG" --config /dev/null
-DAEMON_SOCKS+=("$SOCK")
-sleep 0.3
-if [[ -S "$SOCK" ]]; then ok "daemon start: socket 就绪"; else bad "daemon start: socket 就绪"; fi
+echo x > "$TMP/hl_a"; ln "$TMP/hl_a" "$TMP/hl_b"
+start_hold "$TMP/hl_a"
+err=$(run_mv SAFEUNLINK_ANSWER=n -- "$TMP/hl_b" "$TRASH/" 2>&1)
+if [[ -e "$TMP/hl_b" && ! -e "$TRASH/hl_b" ]]; then ok "硬链接占用时移入回收站按 inode 拦截"; else bad "硬链接占用时移入回收站按 inode 拦截 [$err]"; fi
+stop_hold
+
+echo "== 7. 守护进程 (GUI 弹窗链路) =="
+# 快照在首次 CHECK 时构建; 每个占用场景前重启 daemon 保证快照新鲜
+restart_daemon() {
+    "$DAEMON" stop --socket "$SOCK" >/dev/null 2>&1
+    sleep 0.2
+    # 显式无 DISPLAY: 跳过 zenity (本环境无真实图形服务器), 快速走 fail-open
+    env -u DISPLAY -u WAYLAND_DISPLAY "$DAEMON" start --socket "$SOCK" --log "$LOG" >/dev/null
+    sleep 0.3
+}
+restart_daemon
+if [[ -S "$SOCK" ]]; then ok "daemon start: socket 就绪"; else bad "daemon start"; fi
 
 out=$("$DCLIENT" "$SOCK" PING)
 if [[ "$out" == PONG* ]]; then ok "PING → PONG"; else bad "PING → PONG [$out]"; fi
 
-f="$TMP/d_free"; echo x > "$f"
+f="$TMP/d1"; echo x > "$f"
 read -r ddev dino < <(stat -c '%d %i' "$f")
 out=$("$DCLIENT" "$SOCK" CHECK 999999 "$ddev" "$dino")
 if [[ "$out" == FREE ]]; then ok "CHECK 未占用 → FREE"; else bad "CHECK 未占用 → FREE [$out]"; fi
 
+restart_daemon
 start_hold "$f"
 out=$("$DCLIENT" "$SOCK" CHECK 999999 "$ddev" "$dino")
 if [[ "$out" == HELD*"hold"* ]]; then ok "CHECK 被占用 → HELD(hold)"; else bad "CHECK 被占用 → HELD [$out]"; fi
 out=$("$DCLIENT" "$SOCK" CHECK "$HOLD_PID" "$ddev" "$dino")
 if [[ "$out" == FREE ]]; then ok "CHECK 排除删除者自身 → FREE"; else bad "CHECK 排除删除者自身 [$out]"; fi
+
+# 占用 + 无终端 → daemon ASK → 无 DISPLAY → 跳过 zenity → fail-open 放行
+err=$(run_rm -- -f "$f" 2>&1)
+if [[ ! -e "$f" ]]; then ok "无终端 → daemon 弹窗 (无 DISPLAY → fail-open 放行)"; else bad "无终端 → daemon 弹窗 [$err]"; fi
+if grep -q "ASK" "$LOG"; then ok "daemon 日志记录了 ASK"; else bad "daemon 日志记录了 ASK"; fi
 stop_hold
 
-f="$TMP/d_block"; echo x > "$f"
+# ANSWER 优先于 daemon
+f="$TMP/d2"; echo x > "$f"
+restart_daemon
 start_hold "$f"
-err=$(env LD_PRELOAD="$LIB" SAFEUNLINK_MODE=block SAFEUNLINK_SOCKET="$SOCK" "$RM" "$f" 2>&1)
-if [[ -e "$f" ]]; then ok "daemon 在场时 block 仍拦截 (经 daemon 查询)"; else bad "daemon 在场时 block 仍拦截 [$err]"; fi
-if grep -q "CHECK" "$LOG"; then ok "daemon 日志记录了 CHECK"; else bad "daemon 日志记录了 CHECK"; fi
+err=$(run_rm SAFEUNLINK_ANSWER=n -- "$f" 2>&1); rc=$?
+if [[ -e "$f" && $rc -ne 0 ]]; then ok "SAFEUNLINK_ANSWER=n 优先于 daemon"; else bad "SAFEUNLINK_ANSWER=n 优先于 daemon"; fi
 stop_hold
 
-# ask 无终端 → daemon 弹窗; dialog=none → fail-open 确认删除
-env SAFEUNLINK_TTL=0 SAFEUNLINK_DIALOG=none "$DAEMON" start --socket "$SOCK2" --log "$LOG2" --config /dev/null
-DAEMON_SOCKS+=("$SOCK2")
-sleep 0.3
-f="$TMP/d_ask"; echo x > "$f"
-start_hold "$f"
-err=$(env LD_PRELOAD="$LIB" SAFEUNLINK_MODE=ask SAFEUNLINK_SOCKET="$SOCK2" "$RM" -f "$f" 2>&1)
-if [[ ! -e "$f" ]]; then ok "ask 无终端 → daemon 弹窗 (dialog=none→确认) → 删除"; else bad "ask 无终端 → daemon 弹窗 [$err]"; fi
-if grep -q "无法弹窗" "$LOG2"; then ok "daemon 日志记录弹窗失败回退"; else bad "daemon 日志记录弹窗失败回退"; fi
-stop_hold
-
-f="$TMP/d_ask_ans"; echo x > "$f"
-start_hold "$f"
-err=$(env LD_PRELOAD="$LIB" SAFEUNLINK_MODE=ask SAFEUNLINK_ANSWER=n SAFEUNLINK_SOCKET="$SOCK2" "$RM" -f "$f" 2>&1); rc=$?
-if [[ -e "$f" && $rc -ne 0 ]]; then ok "SAFEUNLINK_ANSWER=n 优先于 daemon 弹窗"; else bad "SAFEUNLINK_ANSWER=n 优先于 daemon 弹窗 [rc=$rc]"; fi
-stop_hold
-
-out=$("$DCLIENT" "$SOCK" NOTIFY 测试通知)
-if [[ "$out" == OK ]]; then ok "NOTIFY → OK"; else bad "NOTIFY → OK [$out]"; fi
-if grep -q "NOTIFY" "$LOG"; then ok "daemon 日志记录了 NOTIFY"; else bad "daemon 日志记录了 NOTIFY"; fi
-
-# 无 DISPLAY 时跳过 zenity, 不挂起, fail-open 放行
-SOCK3="$TMP/su3.sock"; LOG3="$TMP/su3.log"
-env -u DISPLAY -u WAYLAND_DISPLAY SAFEUNLINK_TTL=0 "$DAEMON" start --socket "$SOCK3" --log "$LOG3" --config /dev/null
-DAEMON_SOCKS+=("$SOCK3")
-sleep 0.3
-f="$TMP/d_zenity"; echo x > "$f"
-start_hold "$f"
-err=$(env LD_PRELOAD="$LIB" SAFEUNLINK_MODE=ask SAFEUNLINK_SOCKET="$SOCK3" "$RM" -f "$f" 2>&1)
-if [[ ! -e "$f" ]]; then ok "无 DISPLAY: 跳过 zenity, fail-open 放行 (不挂起)"; else bad "无 DISPLAY: 跳过 zenity [$err]"; fi
-if grep -q "跳过 zenity" "$LOG3"; then ok "daemon 日志记录跳过 zenity"; else bad "daemon 日志记录跳过 zenity"; fi
+# 批量删除不卡死 (有 daemon, 逐个 ASK → 无 DISPLAY → 放行)
+d2="$TMP/batch"; mkdir -p "$d2"
+echo x > "$d2/a"; echo x > "$d2/b"; echo x > "$d2/c"
+restart_daemon
+start_hold "$d2/c"
+run_rm -- -rf "$d2" 2>/dev/null
+if [[ ! -e "$d2/a" && ! -e "$d2/b" && ! -e "$d2/c" ]]; then ok "rm -rf 批量删除不卡死"; else bad "rm -rf 批量删除不卡死"; fi
 stop_hold
 
 "$DAEMON" stop --socket "$SOCK" >/dev/null
-"$DAEMON" stop --socket "$SOCK2" >/dev/null
-"$DAEMON" stop --socket "$SOCK3" >/dev/null
-DAEMON_SOCKS=()
 sleep 0.3
-if [[ ! -S "$SOCK" && ! -S "$SOCK2" && ! -S "$SOCK3" ]]; then ok "stop: socket 已移除"; else bad "stop: socket 已移除"; fi
+if [[ ! -S "$SOCK" ]]; then ok "stop: socket 已移除"; else bad "stop: socket 已移除"; fi
 if ! "$DAEMON" status --socket "$SOCK" >/dev/null 2>&1; then ok "stop 后 status 报告未运行"; else bad "stop 后 status 报告未运行"; fi
 
 # daemon 停止后回退本进程扫描
-f="$TMP/d_fallback"; echo x > "$f"
+f="$TMP/d3"; echo x > "$f"
 start_hold "$f"
-err=$(env LD_PRELOAD="$LIB" SAFEUNLINK_MODE=block SAFEUNLINK_SOCKET="$SOCK" "$RM" "$f" 2>&1)
+err=$(run_rm SAFEUNLINK_ANSWER=n -- "$f" 2>&1)
 if [[ -e "$f" ]]; then ok "daemon 停止后回退本进程扫描, 仍拦截"; else bad "daemon 停止后回退本进程扫描 [$err]"; fi
 stop_hold
 
-echo "== 11. 回收站 (移入 Trash) =="
+if [[ $PTY_OK -eq 1 ]]; then
+    echo "== 8. 真实终端交互 (pty) =="
+    f="$TMP/pty_n"; echo x > "$f"
+    start_hold "$f"
+    out=$(printf 'n\n' | script -qec "env LD_PRELOAD=$LIB $RM '$f'" /dev/null 2>&1)
+    if [[ -e "$f" ]]; then ok "pty 回答 n → 取消删除"; else bad "pty 回答 n → 取消删除"; fi
+    stop_hold
 
-TRASH="$TMP/xdg/Trash/files"; mkdir -p "$TRASH"
-MV="$(command -v mv)"
-run_mv() { # run_mv <mode> [额外 env...] -- mv 参数...
-    local mode="$1"; shift
-    local extra=()
-    while [[ "$1" != "--" ]]; do extra+=("$1"); shift; done
-    shift
-    env LD_PRELOAD="$LIB" SAFEUNLINK_MODE="$mode" \
-        SAFEUNLINK_SOCKET="$TMP/none.sock" SAFEUNLINK_TRASH_DIR="$TRASH" \
-        "${extra[@]}" "$MV" "$@"
-}
+    f="$TMP/pty_y"; echo x > "$f"
+    start_hold "$f"
+    out=$(printf 'y\n' | script -qec "env LD_PRELOAD=$LIB $RM -f '$f'" /dev/null 2>&1)
+    if [[ ! -e "$f" ]]; then ok "pty 回答 y → 确认删除"; else bad "pty 回答 y → 确认删除"; fi
+    stop_hold
 
-# a. block: 占用文件移入回收站被拦截 (返回 EBUSY, 文件保留)
-f="$TMP/trash1"; echo x > "$f"
-start_hold "$f"
-err=$(run_mv block -- "$f" "$TRASH/" 2>&1); rc=$?
-if [[ -e "$f" && ! -e "$TRASH/trash1" && "$err" == *"移入回收站"* ]]; then
-    ok "block: 占用文件移入回收站被拦截"
+    f="$TMP/pty_color"; echo x > "$f"
+    start_hold "$f"
+    out=$(script -qec "env LD_PRELOAD=$LIB $RM -f '$f'" /dev/null 2>&1)
+    if [[ "$out" == *$'\e[31m'* ]]; then ok "终端下红色 ANSI 警告"; else bad "终端下红色 ANSI 警告"; fi
+    stop_hold
 else
-    bad "block: 占用文件移入回收站被拦截 [rc=$rc err=$err]"
+    echo "  (跳过 pty 交互测试: 本环境无法分配伪终端)"
 fi
-stop_hold
-
-# b. 未占用 → 正常移入
-f="$TMP/trash2"; echo x > "$f"
-run_mv block -- "$f" "$TRASH/" 2>/dev/null
-if [[ ! -e "$f" && -e "$TRASH/trash2" ]]; then ok "未占用 → 正常移入回收站"; else bad "未占用 → 正常移入回收站"; fi
-
-# c. 占用文件移到普通目录 → 不拦截 (仅回收站目标)
-d="$TMP/other"; mkdir -p "$d"
-f="$TMP/trash3"; echo x > "$f"
-start_hold "$f"
-run_mv block -- "$f" "$d/" 2>/dev/null
-if [[ ! -e "$f" && -e "$d/trash3" ]]; then ok "移到普通目录不拦截 (仅回收站)"; else bad "移到普通目录不拦截 (仅回收站)"; fi
-stop_hold
-
-# d. warn 模式: 占用也移入, 有提示
-f="$TMP/trash4"; echo x > "$f"
-start_hold "$f"
-err=$(run_mv warn -- "$f" "$TRASH/" 2>&1)
-if [[ ! -e "$f" && -e "$TRASH/trash4" && "$err" == *"[safeunlink]"* ]]; then
-    ok "warn: 占用时提示后仍移入回收站"
-else
-    bad "warn: 占用时提示后仍移入回收站 [$err]"
-fi
-stop_hold
-
-# e. SAFEUNLINK_TRASH=0 关闭回收站拦截
-f="$TMP/trash5"; echo x > "$f"
-start_hold "$f"
-run_mv block SAFEUNLINK_TRASH=0 -- "$f" "$TRASH/" 2>/dev/null
-if [[ ! -e "$f" && -e "$TRASH/trash5" ]]; then ok "SAFEUNLINK_TRASH=0 关闭回收站拦截"; else bad "SAFEUNLINK_TRASH=0 关闭回收站拦截"; fi
-stop_hold
-
-# f. 硬链接: 占用 a 链接时, 把另一链接移入回收站 → 按 inode 拦截
-echo x > "$TMP/hl_a"; ln "$TMP/hl_a" "$TMP/hl_b"
-start_hold "$TMP/hl_a"
-err=$(run_mv block -- "$TMP/hl_b" "$TRASH/" 2>&1)
-if [[ -e "$TMP/hl_b" && ! -e "$TRASH/hl_b" ]]; then ok "硬链接占用时移入回收站按 inode 拦截"; else bad "硬链接占用时移入回收站按 inode 拦截 [$err]"; fi
-stop_hold
 
 echo
 echo "结果: $PASS 通过, $FAIL 失败"

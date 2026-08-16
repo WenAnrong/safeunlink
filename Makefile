@@ -8,7 +8,7 @@ DAEMON  := $(BUILD)/safeunlinkd
 HOLD    := $(BUILD)/hold
 DCLIENT := $(BUILD)/dclient
 
-COMMON_SRC := src/config.c src/snapshot.c
+COMMON_SRC := src/snapshot.c
 
 .PHONY: all install test clean
 
