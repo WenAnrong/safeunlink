@@ -279,6 +279,12 @@ if [[ -f "$R2/launch.log" ]] && grep -q "launch" "$R2/launch.log" \
 else
     bad "install.sh 经 gio launch 覆盖项重新启动 (log: $(cat "$R2/launch.log" 2>/dev/null))"
 fi
+# 回归: 自动重启后安装必须完整跑完 (别名等后续步骤不能因 set -e 中断丢失)
+if [[ -f "$R2/home/.bashrc" ]] && grep -q "# >>> safeunlink >>>" "$R2/home/.bashrc"; then
+    ok "install.sh 完整执行 (别名步骤未被中断)"
+else
+    bad "install.sh 完整执行 (别名步骤未被中断)"
+fi
 env HOME="$R2/home" XDG_RUNTIME_DIR="$R2/run" PREFIX="$R2/prefix" bash "$ROOT/uninstall.sh" >/dev/null 2>&1
 fi
 

@@ -123,7 +123,9 @@ restart_fm() {
     # 4) 验证拦截库是否加载
     local pid=""
     for _ in $(seq 1 10); do
-        pid="$(pgrep -x "$bin" | head -1)"
+        # 注意: set -o pipefail 下 pgrep 无匹配会返回 1, 必须 || true,
+        # 否则安装脚本会在此处被 set -e 终止 (别名等后续步骤丢失)
+        pid="$(pgrep -x "$bin" 2>/dev/null | head -1 || true)"
         [[ -n "$pid" ]] && break
         sleep 0.3
     done
