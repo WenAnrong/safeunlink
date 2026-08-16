@@ -41,9 +41,14 @@ Nemo / Caja / PcManFM) 创建 `~/.local/share/applications/` 启动项覆盖,
 
 ```bash
 cp /usr/share/applications/org.gnome.Nautilus.desktop ~/.local/share/applications/
-# 编辑副本, Exec= 改为:
+# 编辑副本, 做两处修改:
 #   Exec=env LD_PRELOAD=/usr/local/lib/libsafeunlink.so /usr/bin/nautilus %U
+#   DBusActivatable=false        ← 关键! 否则 D-Bus 激活绕过 Exec, 注入不生效
 ```
+
+> 注意: 注入后必须**完全退出文件管理器再重新打开** (`nautilus -q` 后从
+> 启动器打开), 旧进程不带库。验证是否生效:
+> `grep libsafeunlink /proc/$(pgrep -x nautilus)/maps` 有输出即成功。
 
 ## 用法
 

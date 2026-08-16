@@ -210,13 +210,15 @@ cat > "$TMP/fakeapps/org.gnome.Nautilus.desktop" <<EOF
 Type=Application
 Name=Fake Files
 Exec=/usr/bin/nautilus %U
+DBusActivatable=true
 EOF
 env PATH="$TMP/fakebin:$PATH" HOME="$IHOME" XDG_RUNTIME_DIR="$IRUN" PREFIX="$IPREFIX" \
     DESKTOP_DIRS="$TMP/fakeapps" bash "$ROOT/install.sh" >/dev/null 2>&1
 OVERRIDE="$IHOME/.local/share/applications/org.gnome.Nautilus.desktop"
 if [[ -f "$OVERRIDE" ]] && grep -q "^# safeunlink-injected" "$OVERRIDE" \
-    && grep -q "Exec=env LD_PRELOAD=$IPREFIX/lib/libsafeunlink.so " "$OVERRIDE"; then
-    ok "install.sh 自动注入文件管理器 (LD_PRELOAD)"
+    && grep -q "Exec=env LD_PRELOAD=$IPREFIX/lib/libsafeunlink.so " "$OVERRIDE" \
+    && grep -q "^DBusActivatable=false" "$OVERRIDE"; then
+    ok "install.sh 自动注入文件管理器 (LD_PRELOAD + DBusActivatable=false)"
 else
     bad "install.sh 自动注入文件管理器"; cat "$OVERRIDE" 2>/dev/null
 fi

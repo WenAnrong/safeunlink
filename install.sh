@@ -148,6 +148,11 @@ inject_desktop_overrides() {
                 printf 'Exec=env LD_PRELOAD=%s %s %%U\n' "$libq" "$(command -v "$bin")" >> "$dst"
             fi
         fi
+        # 关键: DBusActivatable=true 的应用由 D-Bus 激活 (按系统服务文件拉起),
+        # 会绕过 Exec= 行, LD_PRELOAD 不生效; 必须置 false 让启动器走 Exec=
+        if grep -q "^DBusActivatable=true" "$dst"; then
+            sed -i "s|^DBusActivatable=true|DBusActivatable=false|" "$dst"
+        fi
         grep -q "^# safeunlink-injected" "$dst" || {
             printf '# safeunlink-injected\n' | cat - "$dst" > "$dst.tmp" && mv "$dst.tmp" "$dst"
         }
@@ -159,6 +164,13 @@ inject_desktop_overrides() {
     if [[ $found -eq 0 ]]; then
         echo "  (未检测到常见文件管理器, 跳过注入; 可手动按 README 操作)"
         rm -f "$list"
+    else
+        # 注入后提示重启运行中的文件管理器 (旧进程不带库)
+        for bin in nautilus thunar dolphin nemo caja pcmanfm pcmanfm-qt; do
+            if pgrep -x "$bin" >/dev/null 2>&1; then
+                warn "$bin 正在运行: 注入的拦截库需重启后才生效, 请完全退出 ($bin -q) 后重新打开"
+            fi
+        done
     fi
 }
 
