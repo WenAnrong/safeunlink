@@ -139,6 +139,22 @@ err=$(run_mv SAFEUNLINK_ANSWER=n -- "$TMP/hl_b" "$TRASH/" 2>&1)
 if [[ -e "$TMP/hl_b" && ! -e "$TRASH/hl_b" ]]; then ok "硬链接占用时移入回收站按 inode 拦截"; else bad "硬链接占用时移入回收站按 inode 拦截 [$err]"; fi
 stop_hold
 
+# 模拟文件管理器流程: 移入回收站被拒(取消)后立即"永久删除" →
+# 只弹一次提示, 跟随的 unlink 不再二次询问 (用户已在管理器弹窗中确认)
+TF="$ROOT/build/trashflow"
+f="$TMP/tf"; echo x > "$f"
+start_hold "$f"
+err=$(env LD_PRELOAD="$LIB" SAFEUNLINK_ANSWER=n "$TF" "$f" "$TRASH/tf" 2>&1)
+# 警告头出现次数 = 弹窗次数 (每次弹窗打一行 "文件正被其他程序使用")
+n=$(printf '%s' "$err" | grep -c "文件正被其他程序使用")
+if [[ ! -e "$f" ]]; then
+    ok "回收站被拒后跟随删除: 不再二次询问, 文件被删 (用户已确认)"
+else
+    bad "回收站被拒后跟随删除: 不再二次询问 [$err]"
+fi
+if [[ "$n" -eq 1 ]]; then ok "整个流程只弹一次提示"; else bad "整个流程只弹一次提示 (实际 $n 次) [$err]"; fi
+stop_hold
+
 echo "== 7. 守护进程 (GUI 弹窗链路) =="
 # 快照在首次 CHECK 时构建; 每个占用场景前重启 daemon 保证快照新鲜
 restart_daemon() {

@@ -256,6 +256,16 @@ static struct {
     int refused;
 } g_last_guard;
 
+/* 回收站拦截被用户拒绝后的记录: 文件管理器 (同一进程) 会紧接着
+ * 弹出"无法移动到回收站, 要立刻删除吗?", 若用户确认则执行 unlink;
+ * 此时不再二次询问 (用户已明确确认), 避免连续两个弹窗。 */
+static struct {
+    dev_t dev;
+    ino_t ino;
+    pid_t pid;
+    long long ts_ms;
+} g_trash_refused;
+
 static long long now_ms(void)
 {
     struct timespec now;
@@ -274,6 +284,17 @@ static int maybe_guard(const char *path, const char *op)
     if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)) return 0;  /* 设备节点 */
 
     long long ts = now_ms();
+
+    /* 回收站被拒后的跟随删除: 用户已在文件管理器的"立即删除"弹窗里
+       再次确认, 不再二次询问 (须在 300ms 去重之前判断) */
+    if (strcmp(op, "删除") == 0 &&
+        g_trash_refused.pid == getpid() &&
+        g_trash_refused.dev == st.st_dev &&
+        g_trash_refused.ino == st.st_ino &&
+        ts - g_trash_refused.ts_ms < 30000) {
+        return 0;
+    }
+
     if (g_last_guard.pid == getpid() &&
         g_last_guard.dev == st.st_dev &&
         g_last_guard.ino == st.st_ino &&
@@ -364,6 +385,16 @@ static int maybe_guard_rename(const char *old, const char *newp)
     if (!is_trash_move(newp)) return 0;             /* 普通移动不拦截 */
     int saved = errno;
     int rc = maybe_guard(old, "移入回收站");
+    if (rc != 0) {
+        /* 记录被拒的回收站移动, 供随后的"永久删除"免二次询问 */
+        struct stat st;
+        if (lstat(old, &st) == 0) {
+            g_trash_refused.dev = st.st_dev;
+            g_trash_refused.ino = st.st_ino;
+            g_trash_refused.pid = getpid();
+            g_trash_refused.ts_ms = now_ms();
+        }
+    }
     if (rc == 0) errno = saved;
     return rc;
 }
