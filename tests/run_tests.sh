@@ -242,6 +242,9 @@ env HOME="$IHOME" XDG_RUNTIME_DIR="$IRUN" PREFIX="$IPREFIX" bash "$ROOT/uninstal
 if [[ ! -f "$OVERRIDE" ]]; then ok "uninstall.sh 移除注入的启动项"; else bad "uninstall.sh 移除注入的启动项"; fi
 
 echo "== 9. install.sh 自动重启文件管理器 =="
+if pgrep -x nautilus >/dev/null 2>&1; then
+    echo "  (跳过: 检测到真实 nautilus 正在运行, 避免测试误杀用户文件管理器)"
+else
 R2="$TMP/rtest"; mkdir -p "$R2/home" "$R2/prefix" "$R2/run" "$R2/fakebin" "$R2/fakeapps" "$R2/logbin"
 # 假 gio: 只记录 launch 参数 (必须是 gio launch <覆盖项路径>, 不能用 gtk-launch)
 cat > "$R2/logbin/gio" <<'EOF'
@@ -277,6 +280,7 @@ else
     bad "install.sh 经 gio launch 覆盖项重新启动 (log: $(cat "$R2/launch.log" 2>/dev/null))"
 fi
 env HOME="$R2/home" XDG_RUNTIME_DIR="$R2/run" PREFIX="$R2/prefix" bash "$ROOT/uninstall.sh" >/dev/null 2>&1
+fi
 
 if [[ $PTY_OK -eq 1 ]]; then
     echo "== 10. 真实终端交互 (pty) =="

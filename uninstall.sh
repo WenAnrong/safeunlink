@@ -46,14 +46,17 @@ if "$BINDIR/safeunlinkd" stop >/dev/null 2>&1; then
 else
     echo "  未在运行 (或已卸载)"
 fi
-# 兜底清理 socket / pid 残留
-target_uid="$(id -u)"
-rm -f "/run/user/$target_uid/safeunlink.sock" \
-      "/run/user/$target_uid/safeunlink.sock.pid" \
-      "${XDG_RUNTIME_DIR:-/tmp}/safeunlink.sock" \
-      "${XDG_RUNTIME_DIR:-/tmp}/safeunlink.sock.pid" \
-      "/tmp/safeunlink-$target_uid.sock" \
-      "/tmp/safeunlink-$target_uid.sock.pid"
+# 兜底清理 socket / pid: 仅当确实没有 daemon 进程残留时,
+# 避免误删"运行中 daemon"的 socket 导致其失联
+if ! pgrep -x safeunlinkd >/dev/null 2>&1; then
+    target_uid="$(id -u)"
+    rm -f "/run/user/$target_uid/safeunlink.sock" \
+          "/run/user/$target_uid/safeunlink.sock.pid" \
+          "${XDG_RUNTIME_DIR:-/tmp}/safeunlink.sock" \
+          "${XDG_RUNTIME_DIR:-/tmp}/safeunlink.sock.pid" \
+          "/tmp/safeunlink-$target_uid.sock" \
+          "/tmp/safeunlink-$target_uid.sock.pid"
+fi
 
 if [[ -f "$USER_HOME/.config/autostart/safeunlinkd.desktop" ]]; then
     rm -f "$USER_HOME/.config/autostart/safeunlinkd.desktop"
