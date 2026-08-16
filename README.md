@@ -28,14 +28,16 @@ Linux 允许删除"被打开"的文件, 没有内核级的删除前回调, 所�
 
 ```bash
 ./install.sh      # 检测依赖 → 构建 → 安装 → 启动 daemon → 自启 → rm 别名
-                  #   → 自动给文件管理器注入库 (图形弹窗开箱即用)
+                  #   → 自动给文件管理器注入库并自动重启 (图形弹窗开箱即用)
 ./uninstall.sh    # 一键卸载 (含移除注入)
 ```
 
 安装脚本会自动给检测到的常见文件管理器 (Nautilus / Thunar / Dolphin /
-Nemo / Caja / PcManFM) 创建 `~/.local/share/applications/` 启动项覆盖,
-在 `Exec=` 前加 `env LD_PRELOAD=...`, 因此**图形界面弹窗默认就是配置好的**:
-文件管理器里删除/移入回收站被占用的文件时, 会弹 zenity 询问框。
+Nemo / Caja / PcManFM) 创建 `~/.local/share/applications/` 启动项覆盖:
+在 `Exec=` 前加 `env LD_PRELOAD=...`, 并把 `DBusActivatable` 置为 `false`
+(否则 D-Bus 激活会绕过 Exec=, 注入不生效)。然后**自动重启**运行中的
+文件管理器(经 .desktop 重新拉起, 新进程即加载拦截库)——安装完图形弹窗
+直接可用。不想自动重启: `SAFEUNLINK_NO_RESTART=1 ./install.sh`。
 
 未检测到文件管理器或想手动注入时, 以 Nautilus 为例:
 

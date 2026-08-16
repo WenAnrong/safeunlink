@@ -213,7 +213,7 @@ Exec=/usr/bin/nautilus %U
 DBusActivatable=true
 EOF
 env PATH="$TMP/fakebin:$PATH" HOME="$IHOME" XDG_RUNTIME_DIR="$IRUN" PREFIX="$IPREFIX" \
-    DESKTOP_DIRS="$TMP/fakeapps" bash "$ROOT/install.sh" >/dev/null 2>&1
+    SAFEUNLINK_NO_RESTART=1 DESKTOP_DIRS="$TMP/fakeapps" bash "$ROOT/install.sh" >/dev/null 2>&1
 OVERRIDE="$IHOME/.local/share/applications/org.gnome.Nautilus.desktop"
 if [[ -f "$OVERRIDE" ]] && grep -q "^# safeunlink-injected" "$OVERRIDE" \
     && grep -q "Exec=env LD_PRELOAD=$IPREFIX/lib/libsafeunlink.so " "$OVERRIDE" \
@@ -225,8 +225,44 @@ fi
 env HOME="$IHOME" XDG_RUNTIME_DIR="$IRUN" PREFIX="$IPREFIX" bash "$ROOT/uninstall.sh" >/dev/null 2>&1
 if [[ ! -f "$OVERRIDE" ]]; then ok "uninstall.sh 移除注入的启动项"; else bad "uninstall.sh 移除注入的启动项"; fi
 
+echo "== 9. install.sh 自动重启文件管理器 =="
+R2="$TMP/rtest"; mkdir -p "$R2/home" "$R2/prefix" "$R2/run" "$R2/fakebin" "$R2/fakeapps" "$R2/logbin"
+# 假 gtk-launch: 只记录参数, 不真正启动
+cat > "$R2/logbin/gtk-launch" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "${GTK_LAUNCH_LOG:?}"
+EOF
+chmod +x "$R2/logbin/gtk-launch"
+# 假 nautilus 进程: hold 改名后 comm=nautilus, 常驻模拟"旧文件管理器"
+cp "$HOLD" "$R2/fakebin/nautilus"
+echo x > "$R2/fakeapps-target.txt"
+"$R2/fakebin/nautilus" "$R2/fakeapps-target.txt" 30 >/dev/null 2>&1 &
+FAKEPID=$!
+sleep 0.3
+cat > "$R2/fakeapps/org.gnome.Nautilus.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Fake Files
+Exec=/usr/bin/nautilus %U
+DBusActivatable=true
+EOF
+GTK_LAUNCH_LOG="$R2/launch.log" \
+env PATH="$R2/fakebin:$R2/logbin:$PATH" HOME="$R2/home" XDG_RUNTIME_DIR="$R2/run" PREFIX="$R2/prefix" \
+    DESKTOP_DIRS="$R2/fakeapps" bash "$ROOT/install.sh" >/dev/null 2>&1
+if ! kill -0 "$FAKEPID" 2>/dev/null; then
+    ok "install.sh 自动退出运行中的文件管理器"
+else
+    bad "install.sh 自动退出运行中的文件管理器"; kill "$FAKEPID" 2>/dev/null
+fi
+if [[ -f "$R2/launch.log" ]] && grep -q "org.gnome.Nautilus" "$R2/launch.log"; then
+    ok "install.sh 经 .desktop 重新启动文件管理器 (LD_PRELOAD 生效)"
+else
+    bad "install.sh 经 .desktop 重新启动文件管理器 (log: $(cat "$R2/launch.log" 2>/dev/null))"
+fi
+env HOME="$R2/home" XDG_RUNTIME_DIR="$R2/run" PREFIX="$R2/prefix" bash "$ROOT/uninstall.sh" >/dev/null 2>&1
+
 if [[ $PTY_OK -eq 1 ]]; then
-    echo "== 9. 真实终端交互 (pty) =="
+    echo "== 10. 真实终端交互 (pty) =="
     f="$TMP/pty_n"; echo x > "$f"
     start_hold "$f"
     out=$(printf 'n\n' | script -qec "env LD_PRELOAD=$LIB $RM '$f'" /dev/null 2>&1)

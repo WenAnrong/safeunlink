@@ -100,6 +100,51 @@ if [[ "$PREFIX" == "/usr" || "$PREFIX" == "/usr/local" ]]; then
     $SUDO_CMD ldconfig 2>/dev/null || true
 fi
 
+# 重启单个文件管理器: 优雅退出 → 兜底 pkill → 经 .desktop 重新拉起 → 验证库加载
+restart_fm() {
+    local bin="$1" id="$2"
+    command -v pgrep >/dev/null 2>&1 || { warn "缺少 pgrep, 无法自动重启 $bin"; return 1; }
+    if ! pgrep -x "$bin" >/dev/null 2>&1; then
+        echo "  $bin 未在运行, 无需重启"
+        return 0
+    fi
+    echo "  自动重启 $bin ..."
+    # 1) 优雅退出
+    case "$bin" in
+        nautilus|nemo|caja|thunar) "$bin" -q >/dev/null 2>&1 || true ;;
+        dolphin|pcmanfm|pcmanfm-qt) pkill -x "$bin" >/dev/null 2>&1 || true ;;
+    esac
+    sleep 0.5
+    # 2) 兜底强杀
+    if pgrep -x "$bin" >/dev/null 2>&1; then
+        pkill -x "$bin" >/dev/null 2>&1 || true
+        sleep 0.3
+    fi
+    # 3) 经 .desktop 重新启动 (LD_PRELOAD 才会生效)
+    if command -v gtk-launch >/dev/null 2>&1; then
+        gtk-launch "$id" >/dev/null 2>&1 &
+    elif command -v gio >/dev/null 2>&1; then
+        gio launch "$USER_HOME/.local/share/applications/$id" >/dev/null 2>&1 &
+    else
+        warn "缺少 gtk-launch/gio, 无法自动重启 $bin; 请手动重新打开"
+        return 1
+    fi
+    # 4) 验证拦截库是否加载
+    local pid=""
+    for _ in $(seq 1 10); do
+        pid="$(pgrep -x "$bin" | head -1)"
+        [[ -n "$pid" ]] && break
+        sleep 0.3
+    done
+    if [[ -n "$pid" ]] && grep -q libsafeunlink "/proc/$pid/maps" 2>/dev/null; then
+        echo "  $bin 已重启, 拦截库已加载 ✓ (pid $pid)"
+    elif [[ -n "$pid" ]]; then
+        warn "$bin 已重启, 但未检测到拦截库加载 (pid $pid)"
+    else
+        warn "$bin 重启后未检测到进程 (窗口管理器可能未拉起)"
+    fi
+}
+
 # 给常见文件管理器创建 ~/.local/share/applications 覆盖项,
 # 在 Exec 前加 env LD_PRELOAD=... 使文件管理器加载拦截库 (图形弹窗的前提)。
 # 检测: 可执行名 → .desktop 文件名; DESKTOP_DIRS 可覆盖搜索目录 (测试用)。
@@ -123,6 +168,7 @@ inject_desktop_overrides() {
     : > "$list"
 
     local found=0 bin name src dst
+    local -a injected=()
     for bin in "${!fms[@]}"; do
         command -v "$bin" >/dev/null 2>&1 || continue
         name="${fms[$bin]}"
@@ -158,6 +204,7 @@ inject_desktop_overrides() {
         }
         echo "$dst" >> "$list"
         found=1
+        injected+=("$bin")
         echo "  $name → $dst"
     done
 
@@ -165,12 +212,16 @@ inject_desktop_overrides() {
         echo "  (未检测到常见文件管理器, 跳过注入; 可手动按 README 操作)"
         rm -f "$list"
     else
-        # 注入后提示重启运行中的文件管理器 (旧进程不带库)
-        for bin in nautilus thunar dolphin nemo caja pcmanfm pcmanfm-qt; do
-            if pgrep -x "$bin" >/dev/null 2>&1; then
-                warn "$bin 正在运行: 注入的拦截库需重启后才生效, 请完全退出 ($bin -q) 后重新打开"
-            fi
-        done
+        # 自动重启注入过的文件管理器: 旧进程不带库, 必须经 .desktop 重新拉起
+        if [[ -n "${SAFEUNLINK_NO_RESTART:-}" ]]; then
+            echo "  (SAFEUNLINK_NO_RESTART=1, 跳过自动重启; 请手动完全退出并重新打开文件管理器)"
+        elif [[ $EUID -eq 0 ]]; then
+            warn "以 root 运行, 无法自动重启文件管理器; 请登录后手动完全退出并重新打开"
+        else
+            for bin in "${injected[@]}"; do
+                restart_fm "$bin" "${fms[$bin]}"
+            done
+        fi
     fi
 }
 
