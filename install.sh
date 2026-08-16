@@ -100,7 +100,69 @@ if [[ "$PREFIX" == "/usr" || "$PREFIX" == "/usr/local" ]]; then
     $SUDO_CMD ldconfig 2>/dev/null || true
 fi
 
-# ---------- 5. 用户级: daemon + 自启 + 别名 ----------
+# 给常见文件管理器创建 ~/.local/share/applications 覆盖项,
+# 在 Exec 前加 env LD_PRELOAD=... 使文件管理器加载拦截库 (图形弹窗的前提)。
+# 检测: 可执行名 → .desktop 文件名; DESKTOP_DIRS 可覆盖搜索目录 (测试用)。
+inject_desktop_overrides() {
+    local -A fms=(
+        [nautilus]=org.gnome.Nautilus.desktop
+        [thunar]=thunar.desktop
+        [dolphin]=org.kde.dolphin.desktop
+        [nemo]=nemo.desktop
+        [caja]=caja.desktop
+        [pcmanfm]=pcmanfm.desktop
+        [pcmanfm-qt]=org.pcmanfm.pcmanfm-qt.desktop
+    )
+    local appdir="$USER_HOME/.config/safeunlink"
+    local list="$appdir/desktop-overrides.list"
+    local deskdirs="${DESKTOP_DIRS:-/usr/local/share/applications /usr/share/applications}"
+    local lib="$LIBDIR/libsafeunlink.so"
+    local libq="$lib"
+    [[ "$lib" == *" "* ]] && libq="\"$lib\""
+    mkdir -p "$appdir"
+    : > "$list"
+
+    local found=0 bin name src dst
+    for bin in "${!fms[@]}"; do
+        command -v "$bin" >/dev/null 2>&1 || continue
+        name="${fms[$bin]}"
+        src=""
+        for d in $deskdirs; do
+            if [[ -f "$d/$name" ]]; then src="$d/$name"; break; fi
+        done
+        [[ -n "$src" ]] || continue
+        dst="$USER_HOME/.local/share/applications/$name"
+
+        if [[ -f "$dst" ]] && ! grep -q "^# safeunlink-injected" "$dst"; then
+            warn "已存在自定义启动项, 跳过注入: $dst (可手动加 env LD_PRELOAD=$lib)"
+            continue
+        fi
+
+        mkdir -p "$(dirname "$dst")"
+        cp "$src" "$dst"
+        if ! grep -q "^Exec=env LD_PRELOAD=" "$dst"; then
+            if grep -q "^Exec=" "$dst"; then
+                # 用 | 作分隔符, 避免与路径中的 / 冲突
+                sed -i "s|^Exec=|Exec=env LD_PRELOAD=$libq |" "$dst"
+            else
+                printf 'Exec=env LD_PRELOAD=%s %s %%U\n' "$libq" "$(command -v "$bin")" >> "$dst"
+            fi
+        fi
+        grep -q "^# safeunlink-injected" "$dst" || {
+            printf '# safeunlink-injected\n' | cat - "$dst" > "$dst.tmp" && mv "$dst.tmp" "$dst"
+        }
+        echo "$dst" >> "$list"
+        found=1
+        echo "  $name → $dst"
+    done
+
+    if [[ $found -eq 0 ]]; then
+        echo "  (未检测到常见文件管理器, 跳过注入; 可手动按 README 操作)"
+        rm -f "$list"
+    fi
+}
+
+# ---------- 5. 用户级: daemon + 自启 + 文件管理器注入 + 别名 ----------
 if [[ $CAN_USER -eq 1 ]]; then
     say "启动守护进程..."
     start_daemon() {
@@ -136,6 +198,10 @@ EOF
         chown -R "$SUDO_USER":"$SUDO_USER" "$USER_HOME/.config/autostart"
     fi
     echo "  $USER_HOME/.config/autostart/safeunlinkd.desktop"
+
+    # 给常见文件管理器注入库, 让图形删除/移入回收站也能弹窗
+    say "给文件管理器注入拦截库 (图形弹窗)..."
+    inject_desktop_overrides
 
     if ! grep -q "# >>> safeunlink >>>" "$USER_HOME/.bashrc" 2>/dev/null; then
         say "添加别名 rm='safe-rm' 到 $USER_HOME/.bashrc"

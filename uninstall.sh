@@ -71,6 +71,20 @@ if [[ $CAN_USER -eq 1 ]]; then
         sed -i '/# >>> safeunlink >>>/,/# <<< safeunlink <<</d' "$USER_HOME/.bashrc"
         echo "  已删除 ~/.bashrc 中的 safeunlink 别名块"; removed=1
     fi
+
+    # 删除注入的文件管理器启动项 (仅本脚本创建的)
+    list="$USER_HOME/.config/safeunlink/desktop-overrides.list"
+    if [[ -f "$list" ]]; then
+        while IFS= read -r f; do
+            if [[ -f "$f" ]] && grep -q "^# safeunlink-injected" "$f"; then
+                rm -f "$f"
+                echo "  已删除注入: $f"; removed=1
+            fi
+        done < "$list"
+        rm -f "$list"
+        rmdir "$USER_HOME/.config/safeunlink" 2>/dev/null || true
+        rmdir "$USER_HOME/.local/share/applications" 2>/dev/null || true
+    fi
 fi
 
 # ---------- 2. 系统级: 删除文件 ----------

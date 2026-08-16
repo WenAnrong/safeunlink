@@ -28,11 +28,22 @@ Linux 允许删除"被打开"的文件, 没有内核级的删除前回调, 所�
 
 ```bash
 ./install.sh      # 检测依赖 → 构建 → 安装 → 启动 daemon → 自启 → rm 别名
-./uninstall.sh    # 一键卸载
+                  #   → 自动给文件管理器注入库 (图形弹窗开箱即用)
+./uninstall.sh    # 一键卸载 (含移除注入)
 ```
 
-安装后开新终端即可使用 (终端直接 `rm`; 图形文件管理器需按下方"文件管理器接入"
-注入库)。
+安装脚本会自动给检测到的常见文件管理器 (Nautilus / Thunar / Dolphin /
+Nemo / Caja / PcManFM) 创建 `~/.local/share/applications/` 启动项覆盖,
+在 `Exec=` 前加 `env LD_PRELOAD=...`, 因此**图形界面弹窗默认就是配置好的**:
+文件管理器里删除/移入回收站被占用的文件时, 会弹 zenity 询问框。
+
+未检测到文件管理器或想手动注入时, 以 Nautilus 为例:
+
+```bash
+cp /usr/share/applications/org.gnome.Nautilus.desktop ~/.local/share/applications/
+# 编辑副本, Exec= 改为:
+#   Exec=env LD_PRELOAD=/usr/local/lib/libsafeunlink.so /usr/bin/nautilus %U
+```
 
 ## 用法
 
@@ -48,24 +59,11 @@ safeunlinkd start|stop|status # 守护进程管理 (安装时已自动启动+自
 | `SAFEUNLINK_DISABLE=1` | 完全放行 (万一出问题时的逃生门) |
 | `SAFEUNLINK_ANSWER=y\|n` | 无终端时预置回答 (脚本场景) |
 
-## 文件管理器接入
-
-图形弹窗需要文件管理器进程加载本库。给文件管理器注入 (以 Nautilus 为例):
-
-```bash
-cp /usr/share/applications/org.gnome.Nautilus.desktop ~/.local/share/applications/
-# 编辑副本, Exec= 改为:
-#   Exec=env LD_PRELOAD=/usr/local/lib/libsafeunlink.so /usr/bin/nautilus %U
-```
-
-Thunar / Dolphin 同理。之后在文件管理器里删除/移入回收站被占用的文件时,
-会弹出 zenity 询问框。
-
 ## 构建与测试
 
 ```bash
 make          # 构建 build/libsafeunlink.so / build/safeunlinkd
-make test     # 23 项测试
+make test     # 25 项测试
 ```
 
 ## 设计原则
