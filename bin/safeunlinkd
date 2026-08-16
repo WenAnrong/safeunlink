@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# safeunlinkd — 守护进程管理入口
+# 用法: safeunlinkd start|stop|status|run [--socket PATH] [--log PATH] [--config PATH]
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN="${SAFEUNLINKD_BIN:-$ROOT/build/safeunlinkd}"
+exec "$BIN" "$@"

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# safe-rm — 用 libsafeunlink.so 包装 rm, 删除前检查占用并提示。
+# 用法: safe-rm [rm 参数...]
+# 可设置 SAFEUNLINK_LIB 指定库路径; 其余 SAFEUNLINK_* 环境变量直接透传。
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 依次尝试: 显式指定 → 安装布局 (PREFIX/bin + PREFIX/lib) → 仓库布局 (bin + build) → 默认安装位置
+LIB=""
+for c in \
+    "${SAFEUNLINK_LIB:-}" \
+    "$SCRIPT_DIR/../lib/libsafeunlink.so" \
+    "$SCRIPT_DIR/../build/libsafeunlink.so" \
+    "/usr/local/lib/libsafeunlink.so"; do
+    if [[ -n "$c" && -f "$c" ]]; then LIB="$c"; break; fi
+done
+if [[ -z "$LIB" ]]; then
+    echo "safe-rm: 找不到 libsafeunlink.so (请先 make/install, 或设置 SAFEUNLINK_LIB)" >&2
+    exit 1
+fi
+
+export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$LIB"
+exec "$(command -v rm)" "$@"
