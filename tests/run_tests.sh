@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 测试套件 — 默认功能 (无配置)
+# 测试套件 — 默认功能 (提示并阻止, 不允许删除)
 # 用法: LIB=<路径> HOLD=<路径> DCLIENT=<路径> DAEMON=<路径> bash tests/run_tests.sh
 set -u
 
@@ -14,7 +14,7 @@ MV="$(command -v mv)"
 if [[ ! -f "$LIB" ]]; then echo "缺少 $LIB, 先 make" >&2; exit 1; fi
 if [[ ! -f "$HOLD" ]]; then echo "缺少 $HOLD, 先 make" >&2; exit 1; fi
 
-# pty 探测: 部分沙箱环境无法分配伪终端, 交互测试自动跳过
+# pty 探测: 部分沙箱环境无法分配伪终端, 终端显示测试自动跳过
 PTY_OK=0
 if command -v script >/dev/null && script -qec "true" /dev/null >/dev/null 2>&1; then
     PTY_OK=1
@@ -70,34 +70,25 @@ f="$TMP/free1"; echo x > "$f"
 err=$(run_rm -- -f "$f" 2>&1)
 if [[ ! -e "$f" && "$err" != *"[safeunlink]"* ]]; then ok "直接删除, 无提示"; else bad "直接删除, 无提示 [$err]"; fi
 
-echo "== 2. 占用 + 无 daemon + 无终端 → 提示后放行 (fail-open) =="
+echo "== 2. 占用 → 提示并阻止, 不允许删除 =="
 f="$TMP/held1"; echo x > "$f"
 start_hold "$f"
-err=$(run_rm -- -f "$f" 2>&1)
-if [[ ! -e "$f" && "$err" == *"[safeunlink]"* ]]; then ok "提示被占用后继续删除"; else bad "提示被占用后继续删除 [$err]"; fi
+err=$(run_rm -- -f "$f" 2>&1); rc=$?
+if [[ -e "$f" && $rc -ne 0 && "$err" == *"[safeunlink]"* && "$err" == *"已阻止"* ]]; then
+    ok "提示被占用并阻止删除 (EBUSY), 文件保留"
+else
+    bad "提示被占用并阻止删除 [rc=$rc err=$err]"
+fi
 stop_hold
 
-echo "== 3. 脚本预答 SAFEUNLINK_ANSWER =="
-f="$TMP/ans_n"; echo x > "$f"
-start_hold "$f"
-err=$(run_rm SAFEUNLINK_ANSWER=n -- "$f" 2>&1); rc=$?
-if [[ -e "$f" && $rc -ne 0 ]]; then ok "ANSWER=n → 取消, 文件保留"; else bad "ANSWER=n → 取消 [rc=$rc err=$err]"; fi
-stop_hold
-
-f="$TMP/ans_y"; echo x > "$f"
-start_hold "$f"
-run_rm SAFEUNLINK_ANSWER=y -- -f "$f" 2>/dev/null
-if [[ ! -e "$f" ]]; then ok "ANSWER=y → 确认删除"; else bad "ANSWER=y → 确认删除"; fi
-stop_hold
-
-echo "== 4. 紧急开关 =="
+echo "== 3. 紧急开关 =="
 f="$TMP/disable"; echo x > "$f"
 start_hold "$f"
 run_rm SAFEUNLINK_DISABLE=1 -- -f "$f" 2>/dev/null
 if [[ ! -e "$f" ]]; then ok "SAFEUNLINK_DISABLE=1 完全放行"; else bad "SAFEUNLINK_DISABLE=1 完全放行"; fi
 stop_hold
 
-echo "== 5. 符号链接 / 硬链接 =="
+echo "== 4. 符号链接 / 硬链接 =="
 t="$TMP/target"; echo x > "$t"
 start_hold "$t"
 ln -s "$t" "$TMP/sym"
@@ -107,18 +98,18 @@ stop_hold
 
 ln "$TMP/target" "$TMP/hard"
 start_hold "$TMP/target"
-err=$(run_rm SAFEUNLINK_ANSWER=n -- "$TMP/hard" 2>&1)
-if [[ -e "$TMP/hard" ]]; then ok "硬链接被占用时按 inode 拦截另一链接"; else bad "硬链接被占用时按 inode 拦截另一链接 [$err]"; fi
+err=$(run_rm -- "$TMP/hard" 2>&1)
+if [[ -e "$TMP/hard" ]]; then ok "硬链接被占用时按 inode 阻止删除另一链接"; else bad "硬链接被占用时按 inode 阻止 [$err]"; fi
 stop_hold
 
-echo "== 6. 回收站 (移入 Trash) =="
+echo "== 5. 回收站 (移入 Trash) =="
 f="$TMP/t1"; echo x > "$f"
 start_hold "$f"
-err=$(run_mv SAFEUNLINK_ANSWER=n -- "$f" "$TRASH/" 2>&1)
+err=$(run_mv -- "$f" "$TRASH/" 2>&1)
 if [[ -e "$f" && ! -e "$TRASH/t1" && "$err" == *"移入回收站"* ]]; then
-    ok "占用时移入回收站被拦截"
+    ok "占用时移入回收站被阻止"
 else
-    bad "占用时移入回收站被拦截 [err=$err]"
+    bad "占用时移入回收站被阻止 [err=$err]"
 fi
 stop_hold
 
@@ -135,32 +126,31 @@ stop_hold
 
 echo x > "$TMP/hl_a"; ln "$TMP/hl_a" "$TMP/hl_b"
 start_hold "$TMP/hl_a"
-err=$(run_mv SAFEUNLINK_ANSWER=n -- "$TMP/hl_b" "$TRASH/" 2>&1)
-if [[ -e "$TMP/hl_b" && ! -e "$TRASH/hl_b" ]]; then ok "硬链接占用时移入回收站按 inode 拦截"; else bad "硬链接占用时移入回收站按 inode 拦截 [$err]"; fi
+err=$(run_mv -- "$TMP/hl_b" "$TRASH/" 2>&1)
+if [[ -e "$TMP/hl_b" && ! -e "$TRASH/hl_b" ]]; then ok "硬链接占用时移入回收站按 inode 阻止"; else bad "硬链接占用时移入回收站按 inode 阻止 [$err]"; fi
 stop_hold
 
-# 模拟文件管理器流程: 移入回收站被拒(取消)后立即"永久删除" →
-# 只弹一次提示, 跟随的 unlink 不再二次询问 (用户已在管理器弹窗中确认)
+# 模拟文件管理器流程: 移入回收站被阻止后, 文件管理器弹"要立刻删除吗?",
+# 确认后执行 unlink → 同样被阻止, 且不再二次提示 (全程只提示一次)
 TF="$ROOT/build/trashflow"
 f="$TMP/tf"; echo x > "$f"
 start_hold "$f"
-err=$(env LD_PRELOAD="$LIB" SAFEUNLINK_ANSWER=n "$TF" "$f" "$TRASH/tf" 2>&1)
-# 警告头出现次数 = 弹窗次数 (每次弹窗打一行 "文件正被其他程序使用")
+err=$(env LD_PRELOAD="$LIB" "$TF" "$f" "$TRASH/tf" 2>&1)
 n=$(printf '%s' "$err" | grep -c "文件正被其他程序使用")
-if [[ ! -e "$f" ]]; then
-    ok "回收站被拒后跟随删除: 不再二次询问, 文件被删 (用户已确认)"
+if [[ -e "$f" ]]; then
+    ok "回收站被阻止后的跟随删除同样被阻止, 文件保留"
 else
-    bad "回收站被拒后跟随删除: 不再二次询问 [$err]"
+    bad "回收站被阻止后的跟随删除同样被阻止 [$err]"
 fi
-if [[ "$n" -eq 1 ]]; then ok "整个流程只弹一次提示"; else bad "整个流程只弹一次提示 (实际 $n 次) [$err]"; fi
+if [[ "$n" -eq 1 ]]; then ok "整个流程只提示一次"; else bad "整个流程只提示一次 (实际 $n 次) [$err]"; fi
 stop_hold
 
-echo "== 7. 守护进程 (GUI 弹窗链路) =="
+echo "== 6. 守护进程 (GUI 提示链路) =="
 # 快照在首次 CHECK 时构建; 每个占用场景前重启 daemon 保证快照新鲜
 restart_daemon() {
     "$DAEMON" stop --socket "$SOCK" >/dev/null 2>&1
     sleep 0.2
-    # 显式无 DISPLAY: 跳过 zenity (本环境无真实图形服务器), 快速走 fail-open
+    # 显式无 DISPLAY: 跳过 zenity (本环境无真实图形服务器)
     env -u DISPLAY -u WAYLAND_DISPLAY "$DAEMON" start --socket "$SOCK" --log "$LOG" >/dev/null
     sleep 0.3
 }
@@ -182,27 +172,23 @@ if [[ "$out" == HELD*"hold"* ]]; then ok "CHECK 被占用 → HELD(hold)"; else 
 out=$("$DCLIENT" "$SOCK" CHECK "$HOLD_PID" "$ddev" "$dino")
 if [[ "$out" == FREE ]]; then ok "CHECK 排除删除者自身 → FREE"; else bad "CHECK 排除删除者自身 [$out]"; fi
 
-# 占用 + 无终端 → daemon ASK → 无 DISPLAY → 跳过 zenity → fail-open 放行
-err=$(run_rm -- -f "$f" 2>&1)
-if [[ ! -e "$f" ]]; then ok "无终端 → daemon 弹窗 (无 DISPLAY → fail-open 放行)"; else bad "无终端 → daemon 弹窗 [$err]"; fi
+# 占用 + 无终端 → daemon ASK 提示框 → 仍阻止删除
+err=$(run_rm -- -f "$f" 2>&1); rc=$?
+if [[ -e "$f" && $rc -ne 0 ]]; then ok "无终端 → daemon 提示框, 仍阻止删除"; else bad "无终端 → daemon 提示框, 仍阻止删除 [rc=$rc err=$err]"; fi
 if grep -q "ASK" "$LOG"; then ok "daemon 日志记录了 ASK"; else bad "daemon 日志记录了 ASK"; fi
 stop_hold
 
-# ANSWER 优先于 daemon
-f="$TMP/d2"; echo x > "$f"
-restart_daemon
-start_hold "$f"
-err=$(run_rm SAFEUNLINK_ANSWER=n -- "$f" 2>&1); rc=$?
-if [[ -e "$f" && $rc -ne 0 ]]; then ok "SAFEUNLINK_ANSWER=n 优先于 daemon"; else bad "SAFEUNLINK_ANSWER=n 优先于 daemon"; fi
-stop_hold
-
-# 批量删除不卡死 (有 daemon, 逐个 ASK → 无 DISPLAY → 放行)
+# 批量删除: 被占用文件被阻止, 其余正常删除
 d2="$TMP/batch"; mkdir -p "$d2"
 echo x > "$d2/a"; echo x > "$d2/b"; echo x > "$d2/c"
 restart_daemon
 start_hold "$d2/c"
 run_rm -- -rf "$d2" 2>/dev/null
-if [[ ! -e "$d2/a" && ! -e "$d2/b" && ! -e "$d2/c" ]]; then ok "rm -rf 批量删除不卡死"; else bad "rm -rf 批量删除不卡死"; fi
+if [[ ! -e "$d2/a" && ! -e "$d2/b" && -e "$d2/c" ]]; then
+    ok "rm -rf 中被占用文件被阻止, 其余删除"
+else
+    bad "rm -rf 中被占用文件被阻止, 其余删除"
+fi
 stop_hold
 
 "$DAEMON" stop --socket "$SOCK" >/dev/null
@@ -213,11 +199,11 @@ if ! "$DAEMON" status --socket "$SOCK" >/dev/null 2>&1; then ok "stop 后 status
 # daemon 停止后回退本进程扫描
 f="$TMP/d3"; echo x > "$f"
 start_hold "$f"
-err=$(run_rm SAFEUNLINK_ANSWER=n -- "$f" 2>&1)
-if [[ -e "$f" ]]; then ok "daemon 停止后回退本进程扫描, 仍拦截"; else bad "daemon 停止后回退本进程扫描 [$err]"; fi
+err=$(run_rm -- "$f" 2>&1)
+if [[ -e "$f" ]]; then ok "daemon 停止后回退本进程扫描, 仍阻止"; else bad "daemon 停止后回退本进程扫描 [$err]"; fi
 stop_hold
 
-echo "== 8. 安装脚本: 自动注入文件管理器 =="
+echo "== 7. 安装脚本: 自动注入文件管理器 =="
 IHOME="$TMP/ihome"; IPREFIX="$TMP/iprefix"; IRUN="$TMP/irun"
 mkdir -p "$IHOME" "$IPREFIX" "$IRUN" "$TMP/fakebin" "$TMP/fakeapps"
 printf '#!/bin/sh\nexit 0\n' > "$TMP/fakebin/nautilus"; chmod +x "$TMP/fakebin/nautilus"
@@ -241,7 +227,7 @@ fi
 env HOME="$IHOME" XDG_RUNTIME_DIR="$IRUN" PREFIX="$IPREFIX" bash "$ROOT/uninstall.sh" >/dev/null 2>&1
 if [[ ! -f "$OVERRIDE" ]]; then ok "uninstall.sh 移除注入的启动项"; else bad "uninstall.sh 移除注入的启动项"; fi
 
-echo "== 9. install.sh 自动重启文件管理器 =="
+echo "== 8. install.sh 自动重启文件管理器 =="
 if pgrep -x nautilus >/dev/null 2>&1; then
     echo "  (跳过: 检测到真实 nautilus 正在运行, 避免测试误杀用户文件管理器)"
 else
@@ -289,26 +275,16 @@ env HOME="$R2/home" XDG_RUNTIME_DIR="$R2/run" PREFIX="$R2/prefix" bash "$ROOT/un
 fi
 
 if [[ $PTY_OK -eq 1 ]]; then
-    echo "== 10. 真实终端交互 (pty) =="
-    f="$TMP/pty_n"; echo x > "$f"
-    start_hold "$f"
-    out=$(printf 'n\n' | script -qec "env LD_PRELOAD=$LIB $RM '$f'" /dev/null 2>&1)
-    if [[ -e "$f" ]]; then ok "pty 回答 n → 取消删除"; else bad "pty 回答 n → 取消删除"; fi
-    stop_hold
-
-    f="$TMP/pty_y"; echo x > "$f"
-    start_hold "$f"
-    out=$(printf 'y\n' | script -qec "env LD_PRELOAD=$LIB $RM -f '$f'" /dev/null 2>&1)
-    if [[ ! -e "$f" ]]; then ok "pty 回答 y → 确认删除"; else bad "pty 回答 y → 确认删除"; fi
-    stop_hold
-
-    f="$TMP/pty_color"; echo x > "$f"
+    echo "== 9. 真实终端显示 (pty) =="
+    f="$TMP/pty"; echo x > "$f"
     start_hold "$f"
     out=$(script -qec "env LD_PRELOAD=$LIB $RM -f '$f'" /dev/null 2>&1)
+    if [[ -e "$f" ]]; then ok "终端提示后仍阻止删除, 文件保留"; else bad "终端提示后仍阻止删除"; fi
     if [[ "$out" == *$'\e[31m'* ]]; then ok "终端下红色 ANSI 警告"; else bad "终端下红色 ANSI 警告"; fi
+    if [[ "$out" == *"已阻止"* ]]; then ok "提示包含'已阻止'"; else bad "提示包含'已阻止'"; fi
     stop_hold
 else
-    echo "  (跳过 pty 交互测试: 本环境无法分配伪终端)"
+    echo "  (跳过 pty 终端显示测试: 本环境无法分配伪终端)"
 fi
 
 echo

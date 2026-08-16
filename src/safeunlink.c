@@ -5,15 +5,13 @@
  *   - 劫持 unlink/unlinkat/remove/rmdir (真删), 以及
  *     rename/renameat/renameat2 移入回收站 (XDG Trash/files) 的操作;
  *   - 删除前检查是否有其他进程仍持有该文件 (fd / mmap / cwd / exe);
- *   - 被占用时:
- *       终端     → 红色文字提示 + 询问 (y = 继续, 其他 = 取消)
- *       无终端   → 经 daemon 弹 zenity 图形框 ("仍然删除" / "取消")
- *       无法弹窗 → 提示后放行 (fail-open)
- *   - 紧急开关: SAFEUNLINK_DISABLE=1 完全放行 (任何异常都不拦)
- *   - 脚本预答: SAFEUNLINK_ANSWER=y|n 在无终端时直接采用
+ *   - 被占用时: 只提示, 不允许删除 —— 一律阻止 (返回 EBUSY):
+ *       终端   → 红色文字提示占用者, 直接阻止
+ *       无终端 → 经 daemon 弹 zenity 提示框, 直接阻止
+ *   - 紧急开关: SAFEUNLINK_DISABLE=1 完全放行
  *
- * 设计铁律: fail-open。任何异常 (路径解析失败、/proc 不可读、daemon
- * 不可用、弹窗失败) 一律放行, 绝不阻塞正常文件操作。
+ * fail-open 仅针对"无法判断"的异常 (路径解析失败、/proc 不可读、
+ * daemon 不可用); 一旦确认被占用, 一律阻止, 不提供继续删除的选项。
  */
 #define _GNU_SOURCE
 #include <ctype.h>
@@ -128,16 +126,13 @@ static int daemon_check(dev_t dev, ino_t ino, pid_t self,
     return -1;                    /* ERR 等 → 回退本进程扫描 */
 }
 
-/* 请求 daemon 弹 GUI 询问框。返回 1=确认, 0=取消, -1=不可用 */
-static int daemon_ask(const char *text)
+/* 请求 daemon 弹 GUI 提示框 (只提示, 不询问; 尽力而为, 不等回复) */
+static void daemon_info(const char *text)
 {
     char line[4096];
     snprintf(line, sizeof line, "ASK %d %s\n", (int)getpid(), text);
-    char reply[64];
-    if (daemon_roundtrip(line, reply, sizeof reply, 120000) != 0) return -1;
-    if (!strncmp(reply, "YES", 3)) return 1;
-    if (!strncmp(reply, "NO", 2)) return 0;
-    return -1;
+    char reply[16];
+    daemon_roundtrip(line, reply, sizeof reply, 1000);
 }
 
 /* 替换 \n / \t 为空格, 保证单行协议 */
@@ -147,14 +142,13 @@ static void sanitize_text(char *s)
         if (*s == '\n' || *s == '\t') *s = ' ';
 }
 
-/* ================= 提示与决策 ================= */
+/* ================= 提示 ================= */
 
 static void print_warning(const char *path, const Holder *holders, int n,
                           const char *op)
 {
     int color = isatty(fileno(stderr));
     const char *R = color ? "\033[31m" : "";
-    const char *Y = color ? "\033[33m" : "";
     const char *B = color ? "\033[1m"  : "";
     const char *N = color ? "\033[0m"  : "";
 
@@ -163,71 +157,24 @@ static void print_warning(const char *path, const Holder *holders, int n,
     for (int i = 0; i < n && i < 8; i++)
         fprintf(stderr, "%s  占用: %s (pid %d)%s\n",
                 R, holders[i].comm, (int)holders[i].pid, N);
-    fprintf(stderr, "%s  → 等待你的选择…%s\n", Y, N);
+    fprintf(stderr, "%s  → 已阻止%s, 文件被占用时不允许删除%s\n", R, op, N);
 }
 
-/* 返回 1 = 继续, 0 = 取消 (errno=EBUSY) */
-static int ask_user(const char *path, const Holder *holders, int n,
-                    const char *op)
+/* 无终端 (GUI 程序) 时, 请 daemon 弹提示框 (只提示, 尽力而为) */
+static void notify_gui(const char *path, const Holder *holders, int n,
+                       const char *op)
 {
-    int color = isatty(fileno(stderr));
-    const char *R = color ? "\033[31m" : "";
-    const char *Y = color ? "\033[33m" : "";
-    const char *N = color ? "\033[0m"  : "";
-
-    /* 1) 交互终端: 红色提示 + y/N 询问 */
-    int tty = open("/dev/tty", O_RDWR);
-    if (tty >= 0) {
-        fprintf(stderr, "%s[safeunlink] 文件正被其他程序使用, 仍要%s \"%s\" 吗? [y/N] %s",
-                Y, op, path, N);
-        char buf[16];
-        ssize_t rd;
-        do { rd = read(tty, buf, sizeof buf - 1); } while (rd < 0 && errno == EINTR);
-        close(tty);
-        if (rd > 0) {
-            buf[rd] = '\0';
-            char *p = buf;
-            while (*p && *p != '\n' && *p != '\r') p++;
-            *p = '\0';
-            if (buf[0] == 'y' || buf[0] == 'Y') return 1;
-        }
-        fprintf(stderr, "%s[safeunlink] 已取消%s: %s%s\n", R, op, path, N);
-        errno = EBUSY;
-        return 0;
-    }
-
-    /* 2) 脚本预答 */
-    const char *ans = getenv("SAFEUNLINK_ANSWER");
-    if (ans && *ans) {
-        int yes = (ans[0] == 'y' || ans[0] == 'Y');
-        fprintf(stderr, "%s[safeunlink] 使用 SAFEUNLINK_ANSWER 预答 → %s%s\n",
-                Y, yes ? "继续" : "取消", N);
-        if (!yes) { errno = EBUSY; return 0; }
-        return 1;
-    }
-
-    /* 3) daemon 弹 zenity 图形框 */
+    if (isatty(fileno(stderr))) return;
     char text[2048];
     int off = snprintf(text, sizeof text,
                        "文件正被其他程序使用 (%s):\n\n%s\n\n占用:", op, path);
     for (int i = 0; i < n && i < 8 && off < (int)sizeof text - 32; i++)
         off += snprintf(text + off, sizeof text - (size_t)off,
                         " %s(pid %d)", holders[i].comm, (int)holders[i].pid);
-    snprintf(text + off, sizeof text - (size_t)off, "\n\n仍要%s吗?", op);
+    snprintf(text + off, sizeof text - (size_t)off,
+             "\n\n已阻止%s — 文件被占用时不允许删除", op);
     sanitize_text(text);
-    int r = daemon_ask(text);
-    if (r >= 0) {
-        if (!r) {
-            fprintf(stderr, "%s[safeunlink] 已取消%s: %s%s\n", R, op, path, N);
-            errno = EBUSY;
-        }
-        return r;
-    }
-
-    /* 4) fail-open: 无法弹窗 → 提示后继续 */
-    fprintf(stderr, "%s[safeunlink] 无交互终端且无法弹窗, 已继续%s: %s%s\n",
-            Y, op, path, N);
-    return 1;
+    daemon_info(text);
 }
 
 static int path_exempt(const char *path)
@@ -256,9 +203,9 @@ static struct {
     int refused;
 } g_last_guard;
 
-/* 回收站拦截被用户拒绝后的记录: 文件管理器 (同一进程) 会紧接着
- * 弹出"无法移动到回收站, 要立刻删除吗?", 若用户确认则执行 unlink;
- * 此时不再二次询问 (用户已明确确认), 避免连续两个弹窗。 */
+/* 回收站拦截被阻止后的记录: 文件管理器 (同一进程) 会紧接着弹出
+ * "无法移动到回收站, 要立刻删除吗?", 若用户确认则执行 unlink;
+ * 此时静默阻止 (不再二次提示), 文件保留。 */
 static struct {
     dev_t dev;
     ino_t ino;
@@ -285,14 +232,15 @@ static int maybe_guard(const char *path, const char *op)
 
     long long ts = now_ms();
 
-    /* 回收站被拒后的跟随删除: 用户已在文件管理器的"立即删除"弹窗里
-       再次确认, 不再二次询问 (须在 300ms 去重之前判断) */
+    /* 回收站被阻止后的跟随删除: 文件管理器"要立刻删除吗?"的确认操作,
+       同样阻止, 但不再二次提示 (须在 300ms 去重之前判断) */
     if (strcmp(op, "删除") == 0 &&
         g_trash_refused.pid == getpid() &&
         g_trash_refused.dev == st.st_dev &&
         g_trash_refused.ino == st.st_ino &&
         ts - g_trash_refused.ts_ms < 30000) {
-        return 0;
+        errno = EBUSY;
+        return -1;
     }
 
     if (g_last_guard.pid == getpid() &&
@@ -314,14 +262,15 @@ static int maybe_guard(const char *path, const char *op)
     if (held <= 0) return 0;
 
     print_warning(path, holders, n, op);
-    int rc = ask_user(path, holders, n, op) ? 0 : -1;
+    notify_gui(path, holders, n, op);       /* 无终端时弹 GUI 提示框 */
 
     g_last_guard.dev = st.st_dev;
     g_last_guard.ino = st.st_ino;
     g_last_guard.pid = getpid();
     g_last_guard.ts_ms = ts;
-    g_last_guard.refused = (rc != 0);
-    return rc;
+    g_last_guard.refused = 1;
+    errno = EBUSY;
+    return -1;                              /* 只提示, 不允许删除 */
 }
 
 /* ================= 真实函数解析 ================= */

@@ -165,31 +165,31 @@ static int wait_child(pid_t pid, int timeout_ms)
     }
 }
 
-/* 返回 1 = 确认继续, 0 = 取消; 任何失败都按 fail-open 返回 1 */
-static int run_dialog(const char *text)
+/* 弹 GUI 提示框 (只提示被占用并已阻止, 无选择项) */
+static void run_dialog(const char *text)
 {
     if (!getenv("DISPLAY") && !getenv("WAYLAND_DISPLAY")) {
-        log_msg("ASK: 无 DISPLAY/WAYLAND, 无法弹窗, 按 fail-open 继续");
-        return 1;
+        log_msg("ASK: 无 DISPLAY/WAYLAND, 无法弹提示框");
+        return;
     }
     pid_t pid = fork();
     if (pid == 0) {
-        execlp("zenity", "zenity", "--question",
+        execlp("zenity", "zenity", "--info",
                "--title=safeunlink — 文件被占用",
                "--text", text,
-               "--ok-label=仍然删除", "--cancel-label=取消",
+               "--ok-label=知道了",
                "--width=520", (char *)NULL);
         _exit(127);
     }
     if (pid > 0) {
         int code = wait_child(pid, 15000);
-        if (code == 0) { log_msg("ASK: zenity 确认继续"); return 1; }
-        if (code == 1) { log_msg("ASK: zenity 取消"); return 0; }
-        log_msg("ASK: zenity 不可用/超时 (exit=%d), 按 fail-open 继续", code);
-        return 1;
+        if (code == 0 || code == 1)
+            log_msg("ASK: 已显示提示框");
+        else
+            log_msg("ASK: zenity 不可用/超时 (exit=%d)", code);
+    } else {
+        log_msg("ASK: fork 失败");
     }
-    log_msg("ASK: fork 失败, 按 fail-open 继续");
-    return 1;
 }
 
 /* ================= 请求处理 ================= */
@@ -244,8 +244,8 @@ static void handle_client(int cfd)
         }
         const char *text = sp ? sp + 1 : "";
         log_msg("ASK: pid %d 文件: %.200s", (int)pid, text);
-        int yes = run_dialog(text);
-        dprintf(cfd, yes ? "YES\n" : "NO\n");
+        run_dialog(text);
+        dprintf(cfd, "OK\n");
     } else {
         dprintf(cfd, "ERR cmd\n");
     }
