@@ -145,6 +145,16 @@ fi
 if [[ "$n" -eq 1 ]]; then ok "整个流程只提示一次"; else bad "整个流程只提示一次 (实际 $n 次) [$err]"; fi
 stop_hold
 
+# 同进程重试 (文件管理器连续操作): 移入回收站被阻止 → 跟随 unlink 静默阻止
+# → 等 1 秒后再移入回收站 → 再次提示; 全程文件保留, 共 2 次提示
+TR="$ROOT/build/trashretry"
+f="$TMP/tr"; echo x > "$f"
+start_hold "$f"
+err=$(env LD_PRELOAD="$LIB" "$TR" "$f" "$TRASH/tr" 2>&1)
+n=$(printf '%s' "$err" | grep -c "文件正被其他程序使用")
+if [[ -e "$f" && "$n" -eq 2 ]]; then ok "同进程重试: 两次移入回收站各提示一次, 文件保留"; else bad "同进程重试: 两次移入回收站各提示一次 [n=$n err=$err]"; fi
+stop_hold
+
 echo "== 6. 守护进程 (GUI 提示链路) =="
 # 快照在首次 CHECK 时构建; 每个占用场景前重启 daemon 保证快照新鲜
 restart_daemon() {
@@ -190,6 +200,25 @@ else
     bad "rm -rf 中被占用文件被阻止, 其余删除"
 fi
 stop_hold
+
+# 非阻塞弹窗: 提示框未关闭时, 后续请求不能被阻塞 (否则第二次删除静默无提示)
+FD="$TMP/fakebin2"; mkdir -p "$FD"
+printf '#!/bin/sh\nsleep 5\n' > "$FD/zenity"; chmod +x "$FD/zenity"
+"$DAEMON" stop --socket "$SOCK" >/dev/null 2>&1
+sleep 0.2
+env -u WAYLAND_DISPLAY DISPLAY=:99 PATH="$FD:$PATH" \
+    "$DAEMON" start --socket "$SOCK" --log "$LOG" >/dev/null
+sleep 0.3
+t0=$(date +%s%N)
+out=$("$DCLIENT" "$SOCK" ASK 12345 非阻塞提示框测试)
+t1=$(date +%s%N)
+ms=$(( (t1 - t0) / 1000000 ))
+if [[ $ms -lt 3000 ]]; then ok "弹窗不阻塞主循环 (ASK 应答 ${ms}ms)"; else bad "弹窗不阻塞主循环 (ASK 应答 ${ms}ms)"; fi
+t0=$(date +%s%N)
+out=$("$DCLIENT" "$SOCK" PING)
+t1=$(date +%s%N)
+ms=$(( (t1 - t0) / 1000000 ))
+if [[ $ms -lt 3000 ]]; then ok "弹窗挂起期间 PING 仍即时应答 (${ms}ms)"; else bad "弹窗挂起期间 PING 仍即时应答 (${ms}ms)"; fi
 
 "$DAEMON" stop --socket "$SOCK" >/dev/null
 sleep 0.3

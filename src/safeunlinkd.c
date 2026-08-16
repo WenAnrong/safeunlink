@@ -138,32 +138,21 @@ static int client_op(const char *cmd, char *reply, size_t rsz)
     return 0;
 }
 
-/* ================= GUI 弹窗 ================= */
+/* ================= GUI 弹窗 (非阻塞) ================= */
 
-/* 等待子进程退出, 最多 timeout_ms; 超时强杀并返回 -1 */
-static int wait_child(pid_t pid, int timeout_ms)
+static long long now_ms(void)
 {
-    struct timespec t0, now;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    for (;;) {
-        int st = 0;
-        pid_t r = waitpid(pid, &st, WNOHANG);
-        if (r == pid) {
-            if (WIFEXITED(st)) return WEXITSTATUS(st);
-            return -1;
-        }
-        if (r < 0) return -1;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        long elapsed = (long)(now.tv_sec - t0.tv_sec) * 1000
-                     + (now.tv_nsec - t0.tv_nsec) / 1000000;
-        if (elapsed >= timeout_ms) {
-            kill(pid, SIGKILL);
-            waitpid(pid, NULL, 0);
-            return -1;
-        }
-        usleep(50000);
-    }
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
+
+/* 登记正在显示的提示框: 弹出即返回, 不阻塞主循环
+ * (否则第一个弹窗未关时, 后续删除的 CHECK/ASK 全部超时 → 静默阻止) */
+#define MAX_DIALOGS 8
+static pid_t g_dialogs[MAX_DIALOGS];
+static long long g_dialog_deadline[MAX_DIALOGS];
+static int g_ndialogs = 0;
 
 /* 弹 GUI 提示框 (只提示被占用并已阻止, 无选择项) */
 static void run_dialog(const char *text)
@@ -181,15 +170,38 @@ static void run_dialog(const char *text)
                "--width=520", (char *)NULL);
         _exit(127);
     }
-    if (pid > 0) {
-        int code = wait_child(pid, 15000);
-        if (code == 0 || code == 1)
-            log_msg("ASK: 已显示提示框");
-        else
-            log_msg("ASK: zenity 不可用/超时 (exit=%d)", code);
+    if (pid < 0) { log_msg("ASK: fork 失败"); return; }
+    if (g_ndialogs < MAX_DIALOGS) {
+        g_dialogs[g_ndialogs] = pid;
+        g_dialog_deadline[g_ndialogs] = now_ms() + 15000;
+        g_ndialogs++;
+        log_msg("ASK: 已弹提示框 (pid %d)", (int)pid);
     } else {
-        log_msg("ASK: fork 失败");
+        log_msg("ASK: 提示框过多, 跳过 (pid %d)", (int)pid);
     }
+}
+
+/* 在主循环中周期收割弹窗子进程: 已退出则回收, 超时强杀 */
+static void reap_dialogs(void)
+{
+    for (int i = 0; i < g_ndialogs; ) {
+        int st = 0;
+        pid_t r = waitpid(g_dialogs[i], &st, WNOHANG);
+        if (r == g_dialogs[i] || (r < 0 && errno == ECHILD)) {
+            g_dialogs[i] = g_dialogs[--g_ndialogs];         /* 已退出 */
+            continue;
+        }
+        if (now_ms() > g_dialog_deadline[i]) {
+            kill(g_dialogs[i], SIGKILL);
+            waitpid(g_dialogs[i], NULL, 0);
+            log_msg("ASK: 提示框超时, 已关闭 (pid %d)", (int)g_dialogs[i]);
+            g_dialogs[i] = g_dialogs[--g_ndialogs];
+            continue;
+        }
+        i++;
+    }
+    /* 收割未跟踪的子进程 (容量满时跳过的), 防僵尸 */
+    while (waitpid(-1, NULL, WNOHANG) > 0) ;
 }
 
 /* ================= 请求处理 ================= */
@@ -290,6 +302,7 @@ static int run_server(void)
     log_msg("daemon 启动 (pid %d, socket %s)", (int)getpid(), g_socket_path);
 
     while (g_running) {
+        reap_dialogs();                     /* 非阻塞收割弹窗子进程 */
         struct pollfd pfd = {lfd, POLLIN, 0};
         int pr = poll(&pfd, 1, 1000);
         if (pr < 0) { if (errno == EINTR) continue; break; }

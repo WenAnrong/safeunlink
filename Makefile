@@ -8,12 +8,13 @@ DAEMON  := $(BUILD)/safeunlinkd
 HOLD    := $(BUILD)/hold
 DCLIENT := $(BUILD)/dclient
 TRASHFLOW := $(BUILD)/trashflow
+TRASHRETRY := $(BUILD)/trashretry
 
 COMMON_SRC := src/snapshot.c
 
 .PHONY: all install test clean
 
-all: $(LIB) $(DAEMON) $(HOLD) $(DCLIENT) $(TRASHFLOW)
+all: $(LIB) $(DAEMON) $(HOLD) $(DCLIENT) $(TRASHFLOW) $(TRASHRETRY)
 
 $(LIB): src/safeunlink.c $(COMMON_SRC) | $(BUILD)
 	$(CC) $(CFLAGS) -shared -o $@ src/safeunlink.c $(COMMON_SRC) $(LDLIBS)
@@ -28,6 +29,9 @@ $(DCLIENT): tests/dclient.c | $(BUILD)
 	$(CC) -O2 -Wall -o $@ $<
 
 $(TRASHFLOW): tests/trashflow.c | $(BUILD)
+	$(CC) -O2 -Wall -o $@ $<
+
+$(TRASHRETRY): tests/trashretry.c | $(BUILD)
 	$(CC) -O2 -Wall -o $@ $<
 
 $(BUILD):
