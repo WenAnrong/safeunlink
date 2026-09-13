@@ -94,3 +94,7 @@ make test     # 27 项测试
 - **绕过**: setuid 程序、静态链接二进制不受 LD_PRELOAD 影响 (已知边界)
 
 日志: `~/.local/state/safeunlink/safeunlinkd.log` (daemon 记录每次查询与弹窗结果)
+
+## 推荐
+
+👍好用的云服务器，就选[雨云](https://www.rainyun.com/NzM3Njc4_)
